@@ -43,6 +43,7 @@ class NormalizedModel:
     created_at_source: str = "unknown"
     model_age_days: float | None = None
     api_calls_per_day: float | None = None
+    api_calls_per_day_display: str = "unknown"
     projected_30d_calls: int | None = None
     projected_30d_calls_display: str = "unknown"
     trending_rank: int | None = None
@@ -636,6 +637,14 @@ def format_human_count(count: int | None) -> str:
     return str(count)
 
 
+def format_api_calls_per_day(count: float | None) -> str:
+    if count is None:
+        return "unknown"
+    if 0 < count < 1:
+        return "<1/day"
+    return f"{format_human_count(int(round(count)))}/day"
+
+
 def infer_api_calls_30d(model: dict[str, Any]) -> tuple[int | None, str, str]:
     known_keys = {
         "apicalls30d",
@@ -644,6 +653,10 @@ def infer_api_calls_30d(model: dict[str, Any]) -> tuple[int | None, str, str]:
         "apiusage30d",
         "apiusagelast30days",
         "last30daysapicalls",
+        "lastmonthapiinvocationcount",
+        "lastmonthapicalls",
+        "lastmonthrequests",
+        "lastmonthinferences",
         "monthlyapicalls",
         "monthlyusage",
         "calls30d",
@@ -730,9 +743,15 @@ def enrich_model_heat_metrics(model: NormalizedModel, now: datetime | None = Non
     created = parse_datetime_utc(model.created_at_utc)
     if created is None or created > now:
         model.model_age_days = None
-        model.api_calls_per_day = None
         model.projected_30d_calls = None
         model.projected_30d_calls_display = "unknown"
+        if model.api_calls_30d is None:
+            model.api_calls_per_day = None
+            model.api_calls_per_day_display = "unknown"
+            return
+        calls_per_day = model.api_calls_30d / 30.0
+        model.api_calls_per_day = round(calls_per_day, 2)
+        model.api_calls_per_day_display = format_api_calls_per_day(calls_per_day)
         return
 
     age_seconds = max((now - created).total_seconds(), 3600.0)
@@ -740,6 +759,7 @@ def enrich_model_heat_metrics(model: NormalizedModel, now: datetime | None = Non
     model.model_age_days = round(age_days, 2)
     if model.api_calls_30d is None:
         model.api_calls_per_day = None
+        model.api_calls_per_day_display = "unknown"
         model.projected_30d_calls = None
         model.projected_30d_calls_display = "unknown"
         return
@@ -748,6 +768,7 @@ def enrich_model_heat_metrics(model: NormalizedModel, now: datetime | None = Non
     calls_per_day = model.api_calls_30d / observed_days
     projected = int(calls_per_day * 30)
     model.api_calls_per_day = round(calls_per_day, 2)
+    model.api_calls_per_day_display = format_api_calls_per_day(calls_per_day)
     model.projected_30d_calls = projected
     model.projected_30d_calls_display = format_human_count(projected)
 

@@ -34,10 +34,8 @@ def _ask_tkinter() -> bool | None:
         keep = messagebox.askyesno(
             "NVIDIA Model Probe",
             "任务已完成。是否保留程序文件？\n\n"
-            "删除程序文件只会卸载工具本体，不会删除刚刚生成的检测结果。\n"
-            "测试结果文件会继续保留在结果目录。\n"
-            "默认操作是删除程序本体，仅保留测试结果文件。\n"
-            "只有选择“是”才会保留程序文件；选择“否”或关闭窗口都会删除程序本体。",
+            "默认“否”：删除程序本体，保留检测结果。\n"
+            "选择“是”：保留程序文件。",
             default=messagebox.NO,
         )
         root.destroy()
@@ -73,18 +71,16 @@ def _ask_tkinter_delete_after_interrupt() -> bool | None:
 
 def _ask_console() -> bool:
     if not sys.stdin.isatty():
-        print("当前不是交互式终端，无法输入 y，默认删除程序本体，仅保留测试结果文件。")
+        print("当前不是交互式终端，默认删除程序本体；检测结果会保留。")
         return False
     print("\n任务已完成。是否保留程序文件？")
-    print("删除程序文件只会卸载工具本体，不会删除刚刚生成的检测结果。")
-    print("测试结果文件会继续保留在结果目录。")
-    print("默认操作：直接回车或 Ctrl+C 将删除程序本体，仅保留测试结果文件。")
-    print("只有输入 y 或 yes 才会保留程序文件。")
+    print("默认回车/Ctrl+C：删除程序本体，保留检测结果。")
+    print("输入 y/yes：保留程序文件。")
     while True:
         try:
-            answer = input("保留程序文件？输入 y 保留，直接回车删除 [y/N]: ").strip().lower()
+            answer = input("保留程序文件？[y/N]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
-            print("\n未输入 y，默认删除程序本体；不会删除检测结果，测试结果文件会继续保留。")
+            print("\n未输入 y，默认删除程序本体；检测结果会保留。")
             return False
         if answer in ("y", "yes"):
             return True

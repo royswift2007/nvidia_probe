@@ -83,6 +83,8 @@ def base_result(model: NormalizedModel) -> dict[str, Any]:
         "free_reason": model.free_reason,
         "api_calls_30d": model.api_calls_30d,
         "api_calls_30d_display": model.api_calls_30d_display,
+        "api_calls_per_day": model.api_calls_per_day,
+        "api_calls_per_day_display": model.api_calls_per_day_display,
         "api_calls_30d_source": model.api_calls_30d_source,
         "usage_rank": model.usage_rank,
         "trending_rank": model.trending_rank,

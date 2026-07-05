@@ -12,6 +12,7 @@ RESULT_COLUMNS = [
     "latency_total_ms",
     "http_status",
     "model_type",
+    "api_calls_per_day_display",
     "context_length",
     "max_output_tokens",
     "supports_image_input",
@@ -210,11 +211,11 @@ def print_table(results: list[dict[str, Any]], limit: int = 30) -> None:
         from rich.console import Console
         from rich.table import Table
     except ImportError:
-        print("model_id,status,latency_ms,context,max_output,vision,coding,reasoning,tools,error")
+        print("model_id,status,latency_ms,daily_calls,context,max_output,vision,coding,reasoning,tools,error")
         for item in _sorted_results(results)[:limit]:
             print(
                 f"{item.get('model_id','')},{item.get('test_status','')},{item.get('latency_total_ms','')},"
-                f"{item.get('context_length','')},{item.get('max_output_tokens','')},"
+                f"{item.get('api_calls_per_day_display','')},{item.get('context_length','')},{item.get('max_output_tokens','')},"
                 f"{item.get('supports_image_input','')},{item.get('supports_coding','')},"
                 f"{item.get('supports_reasoning','')},{item.get('supports_function_calling','')},"
                 f"{str(item.get('error_type',''))[:80]}"
@@ -225,6 +226,7 @@ def print_table(results: list[dict[str, Any]], limit: int = 30) -> None:
     table.add_column("model_id", overflow="fold")
     table.add_column("status")
     table.add_column("latency_ms", justify="right")
+    table.add_column("daily_calls", justify="right")
     table.add_column("ctx", justify="right")
     table.add_column("max_out", justify="right")
     table.add_column("vision")
@@ -237,6 +239,7 @@ def print_table(results: list[dict[str, Any]], limit: int = 30) -> None:
             str(item.get("model_id", "")),
             str(item.get("test_status", "")),
             str(item.get("latency_total_ms", "")),
+            str(item.get("api_calls_per_day_display", "")),
             str(item.get("context_length", "")),
             str(item.get("max_output_tokens", "")),
             str(item.get("supports_image_input", "")),

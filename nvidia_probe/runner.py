@@ -46,6 +46,8 @@ def _format_model_identity(model: NormalizedModel) -> str:
         parts.append(f"trend_rank={model.trending_rank}")
     calls_display = model.api_calls_30d_display or "unknown"
     parts.append(f"30d_calls={calls_display}")
+    if model.api_calls_per_day_display not in ("", "unknown"):
+        parts.append(f"daily_calls={model.api_calls_per_day_display}")
     if model.projected_30d_calls_display not in ("", "unknown"):
         parts.append(f"projected_30d={model.projected_30d_calls_display}")
     if model.model_age_days is not None:

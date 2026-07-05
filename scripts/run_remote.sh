@@ -109,6 +109,69 @@ preserve_old_results_if_needed() {
   log "已保留旧结果目录: $destination"
 }
 
+args_contain_api_key() {
+  local previous_was_api_key=0
+  local arg
+  for arg in "$@"; do
+    if [ "$previous_was_api_key" -eq 1 ]; then
+      if [ -n "$arg" ]; then
+        return 0
+      fi
+      previous_was_api_key=0
+      continue
+    fi
+
+    case "$arg" in
+      --api-key=*)
+        return 0
+        ;;
+      --api-key)
+        previous_was_api_key=1
+        ;;
+    esac
+  done
+
+  return 1
+}
+
+prompt_api_key_if_needed() {
+  if [ -n "${NVIDIA_API_KEY:-}" ]; then
+    export NVIDIA_API_KEY
+    log "已从 NVIDIA_API_KEY 环境变量读取 API Key，跳过输入。"
+    return 0
+  fi
+
+  if [ -n "${NGC_API_KEY:-}" ]; then
+    export NVIDIA_API_KEY="$NGC_API_KEY"
+    log "已从 NGC_API_KEY 环境变量读取 API Key，跳过输入。"
+    return 0
+  fi
+
+  if args_contain_api_key "$@"; then
+    log "已从命令行参数检测到 --api-key，跳过输入。"
+    return 0
+  fi
+
+  if [ ! -t 0 ]; then
+    log "未设置 NVIDIA_API_KEY/NGC_API_KEY，且当前不是交互式终端，无法安全输入 API Key。"
+    log "请设置环境变量 NVIDIA_API_KEY 后重试。"
+    exit 1
+  fi
+
+  printf '[nvidia-probe] 请输入 NVIDIA API Key（输入不可见）: '
+  IFS= read -r -s NVIDIA_API_KEY
+  printf '\n'
+
+  if [ -z "$NVIDIA_API_KEY" ]; then
+    log "未输入 NVIDIA API Key，已停止。"
+    exit 1
+  fi
+
+  export NVIDIA_API_KEY
+  log "API Key 已读取；后续将自动安装/更新并开始检测。"
+}
+
+prompt_api_key_if_needed "$@"
 ensure_command git
 ensure_command "$PYTHON_BIN"
 ensure_venv_ready
@@ -150,7 +213,7 @@ mkdir -p "$RESULT_DIR"
 rm -f "$CLEANUP_MARKER"
 export NVIDIA_PROBE_CLEANUP_MARKER="$CLEANUP_MARKER"
 
-log "启动检测。如果未设置 NVIDIA_API_KEY，将提示隐藏输入 API Key。"
+log "启动检测。API Key 已准备好，后续 Python CLI 不会再次提示输入。"
 log "结果目录: $RESULT_DIR"
 log "默认参数: --cleanup-prompt auto；运行结束后会询问是否保留程序。默认直接回车或 Ctrl+C 会卸载程序本体，但不会删除检测结果；输入 y 才保留程序。"
 set +e

@@ -529,13 +529,17 @@ def apply_build_catalog_to_models(
             target.display_name = catalog_model.display_name
         if not target.provider:
             target.provider = catalog_model.publisher
+        heat_metrics_changed = False
         if catalog_model.api_calls_30d is not None:
             target.api_calls_30d = catalog_model.api_calls_30d
             target.api_calls_30d_display = catalog_model.api_calls_30d_display
             target.api_calls_30d_source = catalog_model.api_calls_30d_source
+            heat_metrics_changed = True
         if catalog_model.created_at_utc:
             target.created_at_utc = catalog_model.created_at_utc
             target.created_at_source = catalog_model.created_at_source
+            heat_metrics_changed = True
+        if heat_metrics_changed:
             enrich_model_heat_metrics(target)
         capability_profile = infer_capability_profile(catalog_model.raw, target.model_type)
         target.supports_image_input = capability_profile["supports_image_input"]
