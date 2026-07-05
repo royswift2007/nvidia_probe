@@ -304,9 +304,9 @@ nvidia-probe run --cleanup-prompt auto
 
 手动运行时默认输出目录为 `results`；一键运行脚本默认输出到安装目录外的 `nvidia_probe_results`。结果目录包含：
 
-- `probe_state.json`：断点、运行配置、环境信息、完整原始结果。
-- `nvidia_models_report.csv`：调用决策优先的表格结果，默认把可用模型排在前面，再按连接延迟从低到高排序。
-- `nvidia_models_report.xlsx`：Excel 报告，如果安装 openpyxl。
+- `probe_state.json`：断点、运行配置、环境信息、完整原始结果；排名、30 天调用量、筛选原因、原始模型响应等审计信息仍保留在这里。
+- `nvidia_models_report.csv`：精简调用决策表，只保留调用模型时真正有价值的字段，默认把可用模型排在前面，再按连接延迟从低到高排序。
+- `nvidia_models_report.xlsx`：精简 Excel 报告，如果安装 openpyxl。
 - `merge_report.csv`：多地区合并结果。
 - `merge_report.xlsx`：多地区合并 Excel，如果安装 openpyxl。
 
@@ -318,23 +318,23 @@ Excel 报告包含多个工作表：
 - `Errors`：只列出调用失败、限流、地区阻断、无权限、网络错误等非可用结果。
 - `Environment`：服务器公网 IP、国家、系统、Python 版本等环境信息，方便多地区对比。
 
-报告列已经按调用决策优先排序。最重要的字段包括：
+CSV/XLSX 报告列已经精简为调用决策优先，只保留这些核心字段：
 
+- `model_id` / `display_name` / `provider` / `endpoint_type` / `model_type`：调用时需要识别的模型基础信息。
 - `test_status`：模型是否可用，`available` 表示当前服务器、当前 API Key、当前网络环境下调用成功。
 - `latency_total_ms`：真实探测请求总延迟，越低代表当前环境连接越快。
 - `context_length`：模型上下文长度。
-- `context_length_source`：上下文长度来源，例如 API 元数据、Build 目录描述、Build 单模型详情页或内置已知规格兜底表。
 - `max_output_tokens`：模型最大输出 token 数。
-- `max_output_tokens_source`：最大输出 token 来源，例如详情页请求 schema 中的 `max_tokens.maximum` 或内置已知规格兜底表。
-- `supports_image_input` / `supports_vision`：是否支持图像输入、视觉或多模态能力。
+- `supports_image_input`：是否支持图像输入或多模态输入。
 - `supports_coding`：是否偏向代码生成或 coding 场景。
 - `supports_reasoning`：是否带 reasoning、thinking、math 等推理标签。
 - `supports_function_calling` / `supports_tools`：是否带 tool use、function calling、agentic 等工具调用标签。
 - `supports_json_mode` / `supports_streaming` / `supports_embedding`：JSON、流式、embedding 等调用能力。
-- `capability_tags` / `usecase_tags` / `deployment_providers`：从 NVIDIA Build 元数据提取的能力、用途和部署提供商标签。
-- `error_type` / `error_message` / `http_status`：不可用模型的失败原因。
+- `vector_dimension`：embedding 模型可用时的向量维度。
+- `capability_tags` / `usecase_tags`：从 NVIDIA Build 元数据提取的能力和用途标签。
+- `error_type` / `error_message` / `http_status` / `skip_reason`：不可用模型的失败或跳过原因。
 
-`selection_rank`、`selection_bucket`、`usage_rank`、`api_calls_30d`、`projected_30d_calls` 等筛选和热度字段仍会保留，但已经放在后面，主要用于审计为什么该模型被选入测试集合。
+`selection_rank`、`selection_bucket`、`usage_rank`、`api_calls_30d`、`projected_30d_calls`、`created_at_utc`、`context_length_source`、`max_output_tokens_source` 等审计/来源字段不再写入 CSV/XLSX，避免表格臃肿；如需排查筛选原因或字段来源，可查看完整的 `probe_state.json`。
 
 ## 注意事项
 
