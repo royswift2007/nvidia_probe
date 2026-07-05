@@ -152,7 +152,7 @@ export NVIDIA_PROBE_CLEANUP_MARKER="$CLEANUP_MARKER"
 
 log "启动检测。如果未设置 NVIDIA_API_KEY，将提示隐藏输入 API Key。"
 log "结果目录: $RESULT_DIR"
-log "默认参数: --cleanup-prompt auto；运行结束后会询问是否卸载程序，只保留测试结果。"
+log "默认参数: --cleanup-prompt auto；运行结束后会询问是否保留程序。默认直接回车或 Ctrl+C 会卸载程序本体，但不会删除检测结果；输入 y 才保留程序。"
 set +e
 python -m nvidia_probe run --cleanup-prompt auto --output-dir "$RESULT_DIR" "$@"
 status=$?
@@ -172,5 +172,5 @@ if [ -f "$CLEANUP_MARKER" ]; then
   fi
 fi
 
-log "测试结果保留在: $RESULT_DIR"
+printf '[nvidia-probe] 测试结果保留在: \033[1;33m%s\033[0m\n' "$RESULT_DIR"
 exit "$status"

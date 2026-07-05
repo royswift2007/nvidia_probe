@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .build_catalog import apply_build_catalog_to_models, fetch_free_endpoint_catalog
+from .build_catalog import apply_build_catalog_to_models, enrich_token_specs_from_build_pages, fetch_free_endpoint_catalog
 from .client import NvidiaApiClient
 from .cleanup import maybe_cleanup_program
 from .config import ProbeConfig
@@ -53,6 +53,15 @@ def _format_model_identity(model: NormalizedModel) -> str:
     return " | ".join(parts)
 
 
+def _format_token_spec_coverage(models: list[NormalizedModel]) -> str:
+    total = len(models)
+    if total <= 0:
+        return "上下文/输出 token 规格覆盖: 0/0。"
+    context_count = sum(1 for model in models if str(model.context_length).strip().lower() not in {"", "unknown", "none"})
+    output_count = sum(1 for model in models if str(model.max_output_tokens).strip().lower() not in {"", "unknown", "none"})
+    return f"上下文/输出 token 规格覆盖: context={context_count}/{total}，max_output={output_count}/{total}。"
+
+
 def _format_running_stats(processed: int, total: int, available: int, failed: int, skipped: int) -> str:
     return f"累计: 已处理 {processed}/{total}，成功 {available}，失败 {failed}，跳过 {skipped}"
 
@@ -76,6 +85,8 @@ def _print_startup(config: ProbeConfig, environment: dict[str, Any]) -> None:
         f"(稳定热门比例={config.stable_top_ratio}, 新晋热门={config.trending_models}, "
         f"新模型保底={config.newest_models}, 新模型窗口={config.new_model_days}天)"
     )
+    print(f"- 抓取模型详情页补全 token 规格: {config.fetch_model_details}")
+    print(f"- 模型详情页抓取间隔: {config.detail_delay_min}-{config.detail_delay_max} 秒随机")
     print(f"- 请求间隔: {config.delay_min}-{config.delay_max} 秒随机")
     print(f"- 重试次数: {config.retries}")
     print(f"- 首次 429 立即停止: {config.stop_on_first_429}")
@@ -147,6 +158,7 @@ def run_probe(config: ProbeConfig, project_root: Path) -> int:
         models = normalize_models(models_response.data)
         total_model_count = len(models)
         catalog_apply = None
+        catalog_result = None
         if config.use_build_catalog and config.free_only:
             _print_progress("正在拉取 NVIDIA Build Free Endpoint 模型目录...")
             catalog_result = fetch_free_endpoint_catalog(
@@ -161,6 +173,7 @@ def run_probe(config: ProbeConfig, project_root: Path) -> int:
                 f"已抓取={catalog_apply.catalog_models_count}；"
                 f"与 API 模型匹配={catalog_apply.matched_count}。"
             )
+            _print_progress(_format_token_spec_coverage(models))
             if catalog_apply.unmatched_model_ids:
                 preview = ", ".join(catalog_apply.unmatched_model_ids[:8])
                 suffix = "..." if len(catalog_apply.unmatched_model_ids) > 8 else ""
@@ -224,7 +237,7 @@ def run_probe(config: ProbeConfig, project_root: Path) -> int:
                         f"稳定热门={selection.summary.get('stable_count')}，"
                         f"新晋热门={selection.summary.get('trending_count')}，"
                         f"新模型保底={selection.summary.get('newest_count')}，"
-                        f"补位={selection.summary.get('fallback_fill_count')}。"
+                        f"已选={selection.summary.get('selected_count')}。"
                     )
                 elif selection.summary.get("strategy") == "fallback_no_usage":
                     topn_message = "未获取到 30 天 API 调用量数据，回退为检测全部免费候选模型。"
@@ -261,6 +274,31 @@ def run_probe(config: ProbeConfig, project_root: Path) -> int:
             models = models[: config.limit]
             if len(models) < planned_before_limit_count:
                 _print_progress(f"--limit 已生效: 从 {planned_before_limit_count} 个候选缩减到 {len(models)} 个。")
+
+        if config.fetch_model_details and catalog_result is not None and models:
+            _print_progress("正在低频拉取 NVIDIA Build 模型详情页，补全本次候选模型的上下文长度和最大输出 token...")
+            token_detail_summary = enrich_token_specs_from_build_pages(
+                models,
+                catalog_result,
+                timeout=config.timeout,
+                user_agent=config.request_user_agent,
+                delay_min=config.detail_delay_min,
+                delay_max=config.detail_delay_max,
+            )
+            state["token_detail_summary"] = token_detail_summary
+            _print_progress(
+                "模型详情页 token 规格补全: "
+                f"尝试={token_detail_summary.get('attempted')}；"
+                f"成功页={token_detail_summary.get('fetched')}；"
+                f"context 更新={token_detail_summary.get('context_updated')}；"
+                f"max_output 更新={token_detail_summary.get('max_output_updated')}；"
+                f"已知跳过={token_detail_summary.get('skipped_already_known')}；"
+                f"未匹配={token_detail_summary.get('unmatched')}；"
+                f"错误={len(token_detail_summary.get('errors') or [])}。"
+            )
+            _print_progress(_format_token_spec_coverage(models))
+            if token_detail_summary.get("errors"):
+                _print_progress("模型详情页补全存在错误: " + "; ".join((token_detail_summary.get("errors") or [])[:3]))
 
         if free_model_count:
             plan_free_label = f"{free_model_count} 个可确认 free 模型"

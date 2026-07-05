@@ -41,14 +41,14 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--trending-models",
         type=int,
-        default=4,
-        help="混合 TopN 中按日均/折算 30 天热度保留的新晋热门模型数量；默认 4。",
+        default=6,
+        help="混合 TopN 中按日均/折算 30 天热度保留的新晋热门模型数量；默认 6。",
     )
     run_parser.add_argument(
         "--newest-models",
         type=int,
-        default=2,
-        help="混合 TopN 中最近上架免费模型保底数量；默认 2。",
+        default=0,
+        help="混合 TopN 中最近上架免费模型保底数量；默认 0。",
     )
     run_parser.add_argument(
         "--new-model-days",
@@ -93,6 +93,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_BUILD_CATALOG_URL,
         help="NVIDIA Build Free Endpoint 模型页面 URL。",
     )
+    run_parser.add_argument(
+        "--no-model-details",
+        action="store_true",
+        help="不抓取单模型 Build 详情页补全上下文长度和最大输出 token。",
+    )
+    run_parser.add_argument("--detail-delay-min", type=float, default=1.0, help="抓取单模型详情页间隔下限，单位秒；默认 1。")
+    run_parser.add_argument("--detail-delay-max", type=float, default=3.0, help="抓取单模型详情页间隔上限，单位秒；默认 3。")
     run_parser.add_argument(
         "--cleanup-prompt",
         choices=("auto", "always", "never"),

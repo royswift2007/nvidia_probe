@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -15,7 +16,9 @@ class NormalizedModel:
     model_type: str = "unknown"
     endpoint_type: str = "unknown"
     context_length: Any = "unknown"
+    context_length_source: str = "unknown"
     max_output_tokens: Any = "unknown"
+    max_output_tokens_source: str = "unknown"
     supports_streaming: Any = "unknown"
     supports_tools: Any = "unknown"
     supports_json_mode: Any = "unknown"
@@ -129,6 +132,246 @@ def _to_bool(value: Any) -> bool | None:
         if lowered in {"false", "no", "n", "0"}:
             return False
     return None
+
+
+_MISSING_METADATA_VALUES = {"", "unknown", "none", "null", "n/a", "na"}
+_CONTEXT_PATH_TOKENS = (
+    "contextlength",
+    "contextwindow",
+    "contexttokens",
+    "contextsize",
+    "maxcontext",
+    "maxinputtokens",
+    "inputtokenlimit",
+    "inputtokens",
+    "maxsequencelength",
+    "sequencelength",
+    "modelmaxlength",
+    "maxpositionembeddings",
+)
+_MAX_OUTPUT_PATH_TOKENS = (
+    "maxoutputtokens",
+    "outputtokenlimit",
+    "outputtokens",
+    "maxcompletiontokens",
+    "completiontokenlimit",
+    "maxgenerationtokens",
+    "generationtokenlimit",
+    "maxtokens",
+)
+_KNOWN_MODEL_SPECS: dict[str, dict[str, int]] = {
+    "z-ai/glm-5.2": {"context_length": 1_000_000, "max_output_tokens": 32_768},
+    "minimaxai/minimax-m3": {"context_length": 1_000_000},
+    "nvidia/nemotron-3-ultra-550b-a55b": {"context_length": 1_000_000},
+    "deepseek-ai/deepseek-v4-flash": {"context_length": 1_000_000},
+    "deepseek-ai/deepseek-v4-pro": {"context_length": 1_000_000},
+    "mistralai/mistral-medium-3.5-128b": {"context_length": 262_144},
+    "moonshotai/kimi-k2.6": {"context_length": 256_000},
+    "stepfun-ai/step-3.7-flash": {"context_length": 256_000},
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning": {"context_length": 256_000},
+    "nvidia/nemotron-3.5-content-safety": {"context_length": 128_000},
+}
+
+
+def is_missing_metadata_value(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in _MISSING_METADATA_VALUES
+    return False
+
+
+def _normalized_path(path: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", path.lower())
+
+
+def _quantity_from_number_and_unit(number: str, unit: str) -> int | None:
+    try:
+        numeric = float(number.replace(",", ""))
+    except ValueError:
+        return None
+    if numeric <= 0:
+        return None
+    unit = unit.lower()
+    if unit == "k":
+        return int(numeric * 1_000)
+    if unit == "m":
+        return int(numeric * 1_000_000)
+    return int(numeric)
+
+
+def parse_token_quantity(value: Any, minimum_without_unit: int = 1) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value) if value >= minimum_without_unit else None
+    if not isinstance(value, str):
+        return None
+
+    text = value.strip()
+    if not text:
+        return None
+
+    unit_match = re.search(r"(?<![a-z0-9.])(\d[\d,]*(?:\.\d+)?)\s*([kKmM])\b", text)
+    if unit_match:
+        return _quantity_from_number_and_unit(unit_match.group(1), unit_match.group(2))
+
+    plain_match = re.search(r"(?<![\d.])(\d[\d,]+|\d{4,})(?![\d.])", text)
+    if not plain_match:
+        return None
+    try:
+        numeric = int(plain_match.group(1).replace(",", ""))
+    except ValueError:
+        return None
+    return numeric if numeric >= minimum_without_unit else None
+
+
+def _token_quantities_from_text(text: str, minimum_without_unit: int = 4_096) -> list[int]:
+    values: list[int] = []
+    for match in re.finditer(r"(?<![a-z0-9.])(\d[\d,]*(?:\.\d+)?)\s*([kKmM])\b", text):
+        parsed = _quantity_from_number_and_unit(match.group(1), match.group(2))
+        if parsed is not None:
+            values.append(parsed)
+    for match in re.finditer(r"(?<![\d.])(\d[\d,]+|\d{4,})(?![\d.])", text):
+        parsed = parse_token_quantity(match.group(1), minimum_without_unit=minimum_without_unit)
+        if parsed is not None:
+            values.append(parsed)
+    return values
+
+
+def _clean_spec_text(text: str) -> str:
+    return html.unescape(text).replace('\\"', '"').replace("\\u003c", "<").replace("\\u003e", ">").replace("\\n", "\n")
+
+
+def _infer_structured_token_specs(model: dict[str, Any], source_prefix: str) -> dict[str, Any]:
+    context_candidates: list[tuple[int, str]] = []
+    max_output_candidates: list[tuple[int, str]] = []
+    for path, value in _iter_key_values(model):
+        normalized = _normalized_path(path)
+        if normalized.endswith("minimum") or normalized.endswith("min"):
+            continue
+        parsed = parse_token_quantity(value)
+        if parsed is None:
+            continue
+        if any(token in normalized for token in _CONTEXT_PATH_TOKENS):
+            context_candidates.append((parsed, f"{source_prefix}:{path}"))
+        if any(token in normalized for token in _MAX_OUTPUT_PATH_TOKENS):
+            max_output_candidates.append((parsed, f"{source_prefix}:{path}"))
+
+    result: dict[str, Any] = {
+        "context_length": "unknown",
+        "context_length_source": "unknown",
+        "max_output_tokens": "unknown",
+        "max_output_tokens_source": "unknown",
+    }
+    if context_candidates:
+        value, source = max(context_candidates, key=lambda item: item[0])
+        result["context_length"] = value
+        result["context_length_source"] = source
+    if max_output_candidates:
+        value, source = max(max_output_candidates, key=lambda item: item[0])
+        result["max_output_tokens"] = value
+        result["max_output_tokens_source"] = source
+    return result
+
+
+def _infer_text_token_specs(text: str, source_prefix: str) -> dict[str, Any]:
+    cleaned = _clean_spec_text(text)
+    context_candidates: list[int] = []
+    max_output_candidates: list[int] = []
+
+    lowered = cleaned.lower()
+    for match in re.finditer(r"context", lowered):
+        segment = cleaned[max(0, match.start() - 180) : match.end() + 260]
+        context_candidates.extend(_token_quantities_from_text(segment, minimum_without_unit=4_096))
+
+    for match in re.finditer(
+        r"[\"'](?:max_tokens|maxTokens)[\"']\s*:\s*\{.{0,5000}?[\"']maximum[\"']\s*:\s*(\d[\d,]*)",
+        cleaned,
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        parsed = parse_token_quantity(match.group(1), minimum_without_unit=1)
+        if parsed is not None:
+            max_output_candidates.append(parsed)
+
+    for match in re.finditer(r"(?:max(?:imum)?\s+output|output\s+token|completion\s+token|generation\s+token)", lowered):
+        segment = cleaned[max(0, match.start() - 80) : match.end() + 180]
+        max_output_candidates.extend(_token_quantities_from_text(segment, minimum_without_unit=1_024))
+
+    result: dict[str, Any] = {
+        "context_length": "unknown",
+        "context_length_source": "unknown",
+        "max_output_tokens": "unknown",
+        "max_output_tokens_source": "unknown",
+    }
+    if context_candidates:
+        result["context_length"] = max(context_candidates)
+        result["context_length_source"] = f"{source_prefix}:text"
+    if max_output_candidates:
+        result["max_output_tokens"] = max(max_output_candidates)
+        result["max_output_tokens_source"] = f"{source_prefix}:schema_or_text"
+    return result
+
+
+def _infer_known_model_specs(model_id: str, display_name: str = "") -> dict[str, Any]:
+    key = model_id.strip().lower()
+    known = dict(_KNOWN_MODEL_SPECS.get(key, {}))
+    text_candidates = _token_quantities_from_text(f"{model_id} {display_name}", minimum_without_unit=4_096)
+    if text_candidates and "context_length" not in known:
+        known["context_length"] = max(text_candidates)
+
+    result: dict[str, Any] = {
+        "context_length": "unknown",
+        "context_length_source": "unknown",
+        "max_output_tokens": "unknown",
+        "max_output_tokens_source": "unknown",
+    }
+    if "context_length" in known:
+        result["context_length"] = known["context_length"]
+        result["context_length_source"] = "known_model_specs"
+    if "max_output_tokens" in known:
+        result["max_output_tokens"] = known["max_output_tokens"]
+        result["max_output_tokens_source"] = "known_model_specs"
+    return result
+
+
+def infer_token_specs(model: dict[str, Any], text: str = "", source_prefix: str = "metadata") -> dict[str, Any]:
+    result = _infer_structured_token_specs(model, source_prefix)
+    if text:
+        text_result = _infer_text_token_specs(text, source_prefix)
+        if is_missing_metadata_value(result["context_length"]):
+            result["context_length"] = text_result["context_length"]
+            result["context_length_source"] = text_result["context_length_source"]
+        if is_missing_metadata_value(result["max_output_tokens"]):
+            result["max_output_tokens"] = text_result["max_output_tokens"]
+            result["max_output_tokens_source"] = text_result["max_output_tokens_source"]
+
+    model_id = str(model.get("id") or model.get("model") or model.get("name") or "")
+    display_name = str(model.get("display_name") or model.get("displayName") or "")
+    known_result = _infer_known_model_specs(model_id, display_name)
+    if is_missing_metadata_value(result["context_length"]):
+        result["context_length"] = known_result["context_length"]
+        result["context_length_source"] = known_result["context_length_source"]
+    if is_missing_metadata_value(result["max_output_tokens"]):
+        result["max_output_tokens"] = known_result["max_output_tokens"]
+        result["max_output_tokens_source"] = known_result["max_output_tokens_source"]
+    return result
+
+
+def apply_token_specs_to_model(model: NormalizedModel, specs: dict[str, Any], overwrite: bool = False) -> tuple[bool, bool]:
+    context_updated = False
+    max_output_updated = False
+    if overwrite or is_missing_metadata_value(model.context_length):
+        if not is_missing_metadata_value(specs.get("context_length")):
+            model.context_length = specs.get("context_length")
+            model.context_length_source = str(specs.get("context_length_source") or "unknown")
+            context_updated = True
+    if overwrite or is_missing_metadata_value(model.max_output_tokens):
+        if not is_missing_metadata_value(specs.get("max_output_tokens")):
+            model.max_output_tokens = specs.get("max_output_tokens")
+            model.max_output_tokens_source = str(specs.get("max_output_tokens_source") or "unknown")
+            max_output_updated = True
+    return context_updated, max_output_updated
 
 
 def _format_utc_datetime(value: datetime) -> str:
@@ -515,6 +758,7 @@ def normalize_model(model: dict[str, Any]) -> NormalizedModel:
     api_calls_30d, api_calls_30d_display, api_calls_30d_source = infer_api_calls_30d(model)
     created_at_utc, created_at_source = infer_created_at(model)
     capability_profile = infer_capability_profile(model, model_type)
+    token_specs = infer_token_specs(model, source_prefix="api_models")
     explicit_supports_tools = _deep_first_present(model, ("supports_tools", "tools", "tool_calling"), None)
     explicit_supports_vision = _deep_first_present(model, ("supports_vision", "vision"), None)
     normalized = NormalizedModel(
@@ -524,24 +768,10 @@ def normalize_model(model: dict[str, Any]) -> NormalizedModel:
         owned_by=str(_deep_first_present(model, ("owned_by", "ownedBy", "owner"), "")),
         model_type=model_type,
         endpoint_type=str(_deep_first_present(model, ("endpoint_type", "endpoint", "api_type", "type"), model_type)),
-        context_length=_deep_first_present(
-            model,
-            (
-                "context_length",
-                "contextWindow",
-                "context_window",
-                "max_context_length",
-                "max_context_window",
-                "input_token_limit",
-                "max_input_tokens",
-            ),
-            "unknown",
-        ),
-        max_output_tokens=_deep_first_present(
-            model,
-            ("max_output_tokens", "output_token_limit", "max_tokens", "max_completion_tokens"),
-            "unknown",
-        ),
+        context_length=token_specs["context_length"],
+        context_length_source=token_specs["context_length_source"],
+        max_output_tokens=token_specs["max_output_tokens"],
+        max_output_tokens_source=token_specs["max_output_tokens_source"],
         supports_streaming=_deep_first_present(model, ("supports_streaming", "streaming"), "unknown"),
         supports_tools=explicit_supports_tools if explicit_supports_tools is not None else capability_profile["supports_tools"],
         supports_json_mode=_deep_first_present(model, ("supports_json_mode", "json_mode"), "unknown"),
@@ -658,8 +888,8 @@ def select_models_hybrid_topn(
     models: list[NormalizedModel],
     top_n: int | None,
     stable_ratio: float = 0.7,
-    trending_count: int = 4,
-    newest_count: int = 2,
+    trending_count: int = 6,
+    newest_count: int = 0,
     new_model_days: float = 14.0,
 ) -> ModelSelectionResult:
     for model in models:
@@ -761,12 +991,16 @@ def select_models_hybrid_topn(
         "newest_free",
         lambda item: f"新模型保底池：年龄 {item.model_age_days} 天，30 天调用量 {item.api_calls_30d_display}",
     )
-    add_from_bucket(
-        usage_ranked,
-        top_n - len(selected),
-        "fallback_fill",
-        lambda item: f"补位池：30 天调用量排名 {item.usage_rank}，调用量 {item.api_calls_30d_display}",
-    )
+    if len(selected) < top_n:
+        add_from_bucket(
+            trending_candidates,
+            bucket_counts["trending_new"] + (top_n - len(selected)),
+            "trending_new",
+            lambda item: (
+                f"新晋热门池扩展：折算 30 天调用量 {item.projected_30d_calls_display}，"
+                f"日均 {item.api_calls_per_day or 0:.0f}，年龄 {item.model_age_days} 天"
+            ),
+        )
 
     for index, model in enumerate(selected, start=1):
         model.selection_rank = index

@@ -28,8 +28,8 @@ class ProbeConfig:
     only_model: Optional[str] = None
     hybrid_topn: bool = True
     stable_top_ratio: float = 0.7
-    trending_models: int = 4
-    newest_models: int = 2
+    trending_models: int = 6
+    newest_models: int = 0
     new_model_days: float = 14.0
     include_types: tuple[str, ...] = DEFAULT_INCLUDE_TYPES
     exclude_types: tuple[str, ...] = DEFAULT_SKIP_TYPES
@@ -53,6 +53,9 @@ class ProbeConfig:
     allow_unknown_cost: bool = False
     use_build_catalog: bool = True
     build_catalog_url: str = DEFAULT_BUILD_CATALOG_URL
+    fetch_model_details: bool = True
+    detail_delay_min: float = 1.0
+    detail_delay_max: float = 3.0
     request_user_agent: str = "nvidia-model-probe/0.1.0"
     raw_args: dict[str, object] = field(default_factory=dict)
 
@@ -137,12 +140,19 @@ def build_probe_config(args: argparse.Namespace) -> ProbeConfig:
         allow_unknown_cost=bool(args.allow_unknown_cost),
         use_build_catalog=not bool(args.no_build_catalog),
         build_catalog_url=args.build_catalog_url,
+        fetch_model_details=not bool(args.no_model_details),
+        detail_delay_min=float(args.detail_delay_min),
+        detail_delay_max=float(args.detail_delay_max),
         raw_args={key: value for key, value in vars(args).items() if key != "api_key"},
     )
     if config.delay_max < config.delay_min:
         raise SystemExit("--delay-max 不能小于 --delay-min。")
+    if config.detail_delay_max < config.detail_delay_min:
+        raise SystemExit("--detail-delay-max 不能小于 --detail-delay-min。")
     if config.delay_min < 0 or config.delay_max < 0:
         raise SystemExit("请求间隔不能为负数。")
+    if config.detail_delay_min < 0 or config.detail_delay_max < 0:
+        raise SystemExit("详情页抓取间隔不能为负数。")
     if config.retries < 0:
         raise SystemExit("--retries 不能为负数。")
     if config.max_output_tokens <= 0:

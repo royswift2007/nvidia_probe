@@ -97,7 +97,9 @@ def base_result(model: NormalizedModel) -> dict[str, Any]:
         "projected_30d_calls": model.projected_30d_calls,
         "projected_30d_calls_display": model.projected_30d_calls_display,
         "context_length": model.context_length,
+        "context_length_source": model.context_length_source,
         "max_output_tokens": model.max_output_tokens,
+        "max_output_tokens_source": model.max_output_tokens_source,
         "supports_streaming": model.supports_streaming,
         "supports_tools": model.supports_tools,
         "supports_json_mode": model.supports_json_mode,
@@ -127,7 +129,9 @@ def enrich_callable_model_details(result: dict[str, Any], model: NormalizedModel
     result.update(
         {
             "context_length": model.context_length,
+            "context_length_source": model.context_length_source,
             "max_output_tokens": model.max_output_tokens,
+            "max_output_tokens_source": model.max_output_tokens_source,
             "supports_streaming": model.supports_streaming,
             "supports_tools": model.supports_tools,
             "supports_json_mode": model.supports_json_mode,

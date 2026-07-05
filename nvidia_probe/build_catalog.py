@@ -2,14 +2,26 @@ from __future__ import annotations
 
 import html
 import json
+import random
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 import requests
 
-from .models import NormalizedModel, enrich_model_heat_metrics, format_human_count, infer_capability_profile, infer_created_at, parse_human_count
+from .models import (
+    NormalizedModel,
+    apply_token_specs_to_model,
+    enrich_model_heat_metrics,
+    format_human_count,
+    infer_capability_profile,
+    infer_created_at,
+    infer_token_specs,
+    is_missing_metadata_value,
+    parse_human_count,
+)
 
 DEFAULT_BUILD_CATALOG_URL = "https://build.nvidia.com/models?filters=nimType%3Anim_type_preview"
 
@@ -310,6 +322,139 @@ def _add_lookup(lookup: dict[str, list[NormalizedModel]], key: str, model: Norma
     lookup.setdefault(key, []).append(model)
 
 
+def _detail_page_url(model_id: str) -> str:
+    clean_model_id = model_id.strip().strip("/")
+    encoded_path = "/".join(quote(part, safe="") for part in clean_model_id.split("/") if part)
+    return f"https://build.nvidia.com/{encoded_path}"
+
+
+def _add_catalog_lookup(lookup: dict[str, list[BuildCatalogModel]], key: str, catalog_model: BuildCatalogModel) -> None:
+    if not key:
+        return
+    lookup.setdefault(key, []).append(catalog_model)
+
+
+def _build_catalog_lookups(catalog_result: BuildCatalogResult) -> tuple[dict[str, BuildCatalogModel], dict[str, list[BuildCatalogModel]]]:
+    exact_lookup: dict[str, BuildCatalogModel] = {}
+    normalized_lookup: dict[str, list[BuildCatalogModel]] = {}
+    for catalog_model in catalog_result.models:
+        candidate_values = {catalog_model.model_id, catalog_model.name, catalog_model.display_name}
+        for value in candidate_values:
+            value = str(value or "").strip()
+            if not value:
+                continue
+            exact_lookup.setdefault(value.lower(), catalog_model)
+            _add_catalog_lookup(normalized_lookup, _normalized_match_key(value), catalog_model)
+    return exact_lookup, normalized_lookup
+
+
+def _find_catalog_model_for_normalized(
+    model: NormalizedModel,
+    exact_lookup: dict[str, BuildCatalogModel],
+    normalized_lookup: dict[str, list[BuildCatalogModel]],
+) -> BuildCatalogModel | None:
+    candidate_values = {model.model_id, model.display_name}
+    build_state = model.raw.get("_build_catalog") if isinstance(model.raw, dict) else None
+    if isinstance(build_state, dict):
+        candidate_values.update(
+            str(build_state.get(key) or "")
+            for key in ("model_id", "name", "display_name")
+            if build_state.get(key)
+        )
+    if "/" in model.model_id:
+        candidate_values.add(model.model_id.rsplit("/", 1)[-1])
+
+    for value in candidate_values:
+        value = str(value or "").strip().lower()
+        if value and value in exact_lookup:
+            return exact_lookup[value]
+
+    for value in candidate_values:
+        key = _normalized_match_key(str(value or ""))
+        if not key:
+            continue
+        matches = normalized_lookup.get(key) or []
+        unique_matches = list({id(item): item for item in matches}.values())
+        if len(unique_matches) == 1:
+            return unique_matches[0]
+    return None
+
+
+def enrich_token_specs_from_build_pages(
+    models: list[NormalizedModel],
+    catalog_result: BuildCatalogResult,
+    timeout: float = 60.0,
+    user_agent: str = "nvidia-model-probe/0.1.0",
+    delay_min: float = 1.0,
+    delay_max: float = 3.0,
+) -> dict[str, Any]:
+    exact_lookup, normalized_lookup = _build_catalog_lookups(catalog_result)
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+    )
+    summary: dict[str, Any] = {
+        "attempted": 0,
+        "fetched": 0,
+        "context_updated": 0,
+        "max_output_updated": 0,
+        "skipped_already_known": 0,
+        "unmatched": 0,
+        "errors": [],
+    }
+
+    try:
+        for index, model in enumerate(models, start=1):
+            needs_context = is_missing_metadata_value(model.context_length)
+            needs_max_output = is_missing_metadata_value(model.max_output_tokens)
+            if not needs_context and not needs_max_output:
+                summary["skipped_already_known"] += 1
+                continue
+
+            catalog_model = _find_catalog_model_for_normalized(model, exact_lookup, normalized_lookup)
+            if catalog_model is None:
+                summary["unmatched"] += 1
+                continue
+
+            detail_url = _detail_page_url(catalog_model.model_id)
+            summary["attempted"] += 1
+            try:
+                response = session.get(detail_url, timeout=timeout)
+                response.raise_for_status()
+            except requests.RequestException as exc:
+                summary["errors"].append(f"{catalog_model.model_id}: {exc}")
+            else:
+                summary["fetched"] += 1
+                detail_metadata = dict(catalog_model.raw)
+                detail_metadata["id"] = catalog_model.model_id
+                detail_metadata["model"] = catalog_model.model_id
+                detail_metadata["displayName"] = catalog_model.display_name
+                specs = infer_token_specs(detail_metadata, text=response.text, source_prefix=f"build_detail:{catalog_model.model_id}")
+                context_updated, max_output_updated = apply_token_specs_to_model(model, specs)
+                if context_updated:
+                    summary["context_updated"] += 1
+                if max_output_updated:
+                    summary["max_output_updated"] += 1
+                model.raw.setdefault(
+                    "_build_detail",
+                    {
+                        "url": detail_url,
+                        "context_length_source": model.context_length_source,
+                        "max_output_tokens_source": model.max_output_tokens_source,
+                    },
+                )
+
+            if delay_max > 0 and index < len(models):
+                time.sleep(random.uniform(delay_min, delay_max))
+    finally:
+        session.close()
+
+    return summary
+
+
 def apply_build_catalog_to_models(
     models: list[NormalizedModel],
     catalog_result: BuildCatalogResult,
@@ -371,6 +516,17 @@ def apply_build_catalog_to_models(
         target.supports_coding = capability_profile["supports_coding"]
         target.supports_reasoning = capability_profile["supports_reasoning"]
         target.supports_function_calling = capability_profile["supports_function_calling"]
+        catalog_metadata = dict(catalog_model.raw)
+        catalog_metadata["id"] = catalog_model.model_id
+        catalog_metadata["model"] = catalog_model.model_id
+        catalog_metadata["displayName"] = catalog_model.display_name
+        catalog_description = str(catalog_model.raw.get("description") or "")
+        catalog_specs = infer_token_specs(
+            catalog_metadata,
+            text=catalog_description,
+            source_prefix=f"build_catalog:{catalog_model.model_id}",
+        )
+        apply_token_specs_to_model(target, catalog_specs)
         if target.supports_tools == "unknown":
             target.supports_tools = capability_profile["supports_tools"]
         if target.supports_vision in ("unknown", False):
