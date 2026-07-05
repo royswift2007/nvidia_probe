@@ -26,10 +26,15 @@ class ProbeConfig:
     limit: Optional[int] = None
     top_free_models: Optional[int] = 20
     only_model: Optional[str] = None
+    hybrid_topn: bool = True
+    stable_top_ratio: float = 0.7
+    trending_models: int = 4
+    newest_models: int = 2
+    new_model_days: float = 14.0
     include_types: tuple[str, ...] = DEFAULT_INCLUDE_TYPES
     exclude_types: tuple[str, ...] = DEFAULT_SKIP_TYPES
-    delay_min: float = 30.0
-    delay_max: float = 75.0
+    delay_min: float = 10.0
+    delay_max: float = 25.0
     timeout: float = 60.0
     retries: int = 0
     max_output_tokens: int = 8
@@ -105,6 +110,11 @@ def build_probe_config(args: argparse.Namespace) -> ProbeConfig:
         limit=args.limit,
         top_free_models=args.top_free_models,
         only_model=args.only_model,
+        hybrid_topn=not bool(args.no_hybrid_topn),
+        stable_top_ratio=float(args.stable_top_ratio),
+        trending_models=int(args.trending_models),
+        newest_models=int(args.newest_models),
+        new_model_days=float(args.new_model_days),
         include_types=parse_csv_tuple(args.include_types, DEFAULT_INCLUDE_TYPES),
         exclude_types=parse_csv_tuple(args.exclude_types, DEFAULT_SKIP_TYPES),
         delay_min=float(args.delay_min),
@@ -139,5 +149,13 @@ def build_probe_config(args: argparse.Namespace) -> ProbeConfig:
         raise SystemExit("--max-output-tokens 必须大于 0。")
     if config.top_free_models is not None and config.top_free_models <= 0:
         raise SystemExit("--top-free-models 必须大于 0，或不传该参数使用默认值。")
+    if not 0 <= config.stable_top_ratio <= 1:
+        raise SystemExit("--stable-top-ratio 必须在 0 到 1 之间。")
+    if config.trending_models < 0:
+        raise SystemExit("--trending-models 不能为负数。")
+    if config.newest_models < 0:
+        raise SystemExit("--newest-models 不能为负数。")
+    if config.new_model_days <= 0:
+        raise SystemExit("--new-model-days 必须大于 0。")
     config.apply_strict_safe_defaults()
     return config

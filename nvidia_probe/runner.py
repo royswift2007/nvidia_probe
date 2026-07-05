@@ -9,7 +9,7 @@ from .client import NvidiaApiClient
 from .cleanup import maybe_cleanup_program
 from .config import ProbeConfig
 from .environment import collect_environment
-from .models import NormalizedModel, normalize_models, should_test_model, sort_models_by_api_calls_30d
+from .models import NormalizedModel, normalize_models, select_models_hybrid_topn, should_test_model, sort_models_by_api_calls_30d
 from .ratelimit import BreakerState, should_break, sleep_with_jitter
 from .report import calculate_summary, print_table, write_csv, write_excel
 from .storage import completed_model_ids, initial_state, load_state, save_state, upsert_result
@@ -36,10 +36,20 @@ def _format_model_identity(model: NormalizedModel) -> str:
     if display_name and display_name != model.model_id:
         parts.append(f"name={display_name}")
     parts.append(f"type={model.model_type}")
+    if model.selection_rank is not None:
+        parts.append(f"select_rank={model.selection_rank}")
+    if model.selection_bucket:
+        parts.append(f"bucket={model.selection_bucket}")
     if model.usage_rank is not None:
-        parts.append(f"rank={model.usage_rank}")
+        parts.append(f"usage_rank={model.usage_rank}")
+    if model.trending_rank is not None:
+        parts.append(f"trend_rank={model.trending_rank}")
     calls_display = model.api_calls_30d_display or "unknown"
     parts.append(f"30d_calls={calls_display}")
+    if model.projected_30d_calls_display not in ("", "unknown"):
+        parts.append(f"projected_30d={model.projected_30d_calls_display}")
+    if model.model_age_days is not None:
+        parts.append(f"age={model.model_age_days}d")
     return " | ".join(parts)
 
 
@@ -61,6 +71,11 @@ def _print_startup(config: ProbeConfig, environment: dict[str, Any]) -> None:
     print(f"- 只测试可确认免费模型: {config.free_only}")
     print(f"- 允许未知费用模型: {config.allow_unknown_cost}")
     print(f"- 默认 Top 免费模型数量: {config.top_free_models}")
+    print(
+        f"- 混合 TopN: {config.hybrid_topn} "
+        f"(稳定热门比例={config.stable_top_ratio}, 新晋热门={config.trending_models}, "
+        f"新模型保底={config.newest_models}, 新模型窗口={config.new_model_days}天)"
+    )
     print(f"- 请求间隔: {config.delay_min}-{config.delay_max} 秒随机")
     print(f"- 重试次数: {config.retries}")
     print(f"- 首次 429 立即停止: {config.stop_on_first_429}")
@@ -114,6 +129,7 @@ def run_probe(config: ProbeConfig, project_root: Path) -> int:
         user_agent=config.request_user_agent,
     )
 
+    cleanup_allowed = False
     try:
         _print_progress("正在拉取 NVIDIA 模型列表...")
         models_response = client.get_models()
@@ -122,6 +138,7 @@ def run_probe(config: ProbeConfig, project_root: Path) -> int:
             state["abort_reason"] = f"拉取模型列表失败: {status} {error_type} {error_message[:300]}"
             save_state(config.state_file, state)
             _print_progress(state["abort_reason"])
+            cleanup_allowed = True
             return 2
 
         raw_models = _extract_raw_models(models_response.data)
@@ -189,16 +206,53 @@ def run_probe(config: ProbeConfig, project_root: Path) -> int:
             selectable_count = len(selectable_models)
             ranked_models = sort_models_by_api_calls_30d(selectable_models)
             known_usage = sum(1 for model in ranked_models if model.api_calls_30d is not None)
-            if known_usage > 0 and config.top_free_models is not None:
-                models = ranked_models[: config.top_free_models]
-                topn_message = f"已按 30 天 API 调用量全局排序，仅选择前 {config.top_free_models} 个候选模型。"
+            models_with_created_at = sum(1 for model in ranked_models if model.created_at_utc)
+            if config.hybrid_topn:
+                selection = select_models_hybrid_topn(
+                    selectable_models,
+                    config.top_free_models,
+                    stable_ratio=config.stable_top_ratio,
+                    trending_count=config.trending_models,
+                    newest_count=config.newest_models,
+                    new_model_days=config.new_model_days,
+                )
+                models = selection.models
+                state["selection_summary"] = selection.summary
+                if selection.summary.get("strategy") == "hybrid_topn":
+                    topn_message = (
+                        "已使用混合 TopN 策略选择候选模型："
+                        f"稳定热门={selection.summary.get('stable_count')}，"
+                        f"新晋热门={selection.summary.get('trending_count')}，"
+                        f"新模型保底={selection.summary.get('newest_count')}，"
+                        f"补位={selection.summary.get('fallback_fill_count')}。"
+                    )
+                elif selection.summary.get("strategy") == "fallback_no_usage":
+                    topn_message = "未获取到 30 天 API 调用量数据，回退为检测全部免费候选模型。"
+                else:
+                    topn_message = "未限制 TopN，检测全部免费候选模型。"
             else:
-                models = ranked_models
-                topn_message = "未获取到 30 天 API 调用量数据，回退为检测全部免费候选模型。"
+                if known_usage > 0 and config.top_free_models is not None:
+                    models = ranked_models[: config.top_free_models]
+                    for selection_index, model in enumerate(models, start=1):
+                        model.selection_rank = selection_index
+                        model.selection_bucket = "usage_only"
+                        model.selection_reason = f"仅按 30 天调用量排序：排名 {model.usage_rank}"
+                    topn_message = f"已按 30 天 API 调用量全局排序，仅选择前 {config.top_free_models} 个候选模型。"
+                else:
+                    models = ranked_models
+                    topn_message = "未获取到 30 天 API 调用量数据，回退为检测全部免费候选模型。"
+                state["selection_summary"] = {
+                    "strategy": "usage_only",
+                    "requested_top_n": config.top_free_models,
+                    "selected_count": len(models),
+                    "known_usage_count": known_usage,
+                    "models_with_created_at": models_with_created_at,
+                }
             _print_progress(
                 f"筛选统计: 可确认 free 且类型匹配={selectable_count}；"
                 f"跳过非免费/类型不匹配={skipped_before_topn}；"
-                f"有 30 天调用量数据={known_usage}。"
+                f"有 30 天调用量数据={known_usage}；"
+                f"有上架时间数据={models_with_created_at}。"
             )
             _print_progress(topn_message)
 
@@ -226,6 +280,8 @@ def run_probe(config: ProbeConfig, project_root: Path) -> int:
             _print_progress("即将检测的模型列表:")
             for planned_index, planned_model in enumerate(models, start=1):
                 _print_progress(f"  [{planned_index}/{len(models)}] {_format_model_identity(planned_model)}")
+                if planned_model.selection_reason:
+                    _print_progress(f"      选择原因: {planned_model.selection_reason}")
 
         if models and not config.dry_run:
             estimated_min = len(models) * config.delay_min
@@ -335,8 +391,14 @@ def run_probe(config: ProbeConfig, project_root: Path) -> int:
                     _print_progress(f"安全等待: {slept:.1f} 秒后继续下一个模型。")
 
         _write_reports(config, state)
+        cleanup_allowed = True
         return 0
+    except KeyboardInterrupt:
+        state["abort_reason"] = "用户中断任务，已停止后续模型检测。"
+        save_state(config.state_file, state)
+        _print_progress("检测已被用户中断，已保存当前状态；本次不会执行程序卸载。")
+        return 130
     finally:
         client.close()
-        if config.cleanup_prompt != "never":
+        if cleanup_allowed and config.cleanup_prompt != "never":
             maybe_cleanup_program(config.cleanup_prompt, project_root, _result_paths(config))

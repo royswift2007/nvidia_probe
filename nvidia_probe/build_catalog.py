@@ -9,7 +9,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import requests
 
-from .models import NormalizedModel, format_human_count, parse_human_count
+from .models import NormalizedModel, enrich_model_heat_metrics, format_human_count, infer_created_at, parse_human_count
 
 DEFAULT_BUILD_CATALOG_URL = "https://build.nvidia.com/models?filters=nimType%3Anim_type_preview"
 
@@ -25,6 +25,8 @@ class BuildCatalogModel:
     api_calls_30d_display: str
     api_calls_30d_source: str
     page: int
+    created_at_utc: str = ""
+    created_at_source: str = "unknown"
     raw: dict[str, Any] = field(default_factory=dict)
 
     def to_state(self) -> dict[str, Any]:
@@ -38,6 +40,8 @@ class BuildCatalogModel:
             "api_calls_30d_display": self.api_calls_30d_display,
             "api_calls_30d_source": self.api_calls_30d_source,
             "page": self.page,
+            "created_at_utc": self.created_at_utc,
+            "created_at_source": self.created_at_source,
         }
 
 
@@ -218,6 +222,7 @@ def _catalog_model_from_resource(resource: dict[str, Any], page: int) -> BuildCa
     )
     api_calls = parse_human_count(raw_calls)
     api_calls_display = str(raw_calls) if isinstance(raw_calls, str) and raw_calls else format_human_count(api_calls)
+    created_at_utc, created_at_source = infer_created_at(resource)
 
     return BuildCatalogModel(
         model_id=model_id,
@@ -229,6 +234,8 @@ def _catalog_model_from_resource(resource: dict[str, Any], page: int) -> BuildCa
         api_calls_30d_display=api_calls_display,
         api_calls_30d_source="build_catalog:last_month_api_invocation_count" if api_calls is not None else "unknown",
         page=page,
+        created_at_utc=created_at_utc,
+        created_at_source=f"build_catalog:{created_at_source}" if created_at_source != "unknown" else "unknown",
         raw=resource,
     )
 
@@ -355,6 +362,10 @@ def apply_build_catalog_to_models(
             target.api_calls_30d = catalog_model.api_calls_30d
             target.api_calls_30d_display = catalog_model.api_calls_30d_display
             target.api_calls_30d_source = catalog_model.api_calls_30d_source
+        if catalog_model.created_at_utc:
+            target.created_at_utc = catalog_model.created_at_utc
+            target.created_at_source = catalog_model.created_at_source
+            enrich_model_heat_metrics(target)
         target.raw.setdefault("_build_catalog", catalog_model.to_state())
 
     return BuildCatalogApplyResult(

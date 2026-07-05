@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -27,7 +28,24 @@ class NormalizedModel:
     api_calls_30d_display: str = "unknown"
     api_calls_30d_source: str = "unknown"
     usage_rank: int | None = None
+    created_at_utc: str = ""
+    created_at_source: str = "unknown"
+    model_age_days: float | None = None
+    api_calls_per_day: float | None = None
+    projected_30d_calls: int | None = None
+    projected_30d_calls_display: str = "unknown"
+    trending_rank: int | None = None
+    newest_rank: int | None = None
+    selection_rank: int | None = None
+    selection_bucket: str = ""
+    selection_reason: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class ModelSelectionResult:
+    models: list[NormalizedModel]
+    summary: dict[str, Any]
 
 
 def _first_present(data: dict[str, Any], keys: tuple[str, ...], default: Any = "") -> Any:
@@ -104,6 +122,38 @@ def _to_bool(value: Any) -> bool | None:
         if lowered in {"false", "no", "n", "0"}:
             return False
     return None
+
+
+def _format_utc_datetime(value: datetime) -> str:
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def parse_datetime_utc(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        timestamp = float(value) / 1000 if value > 10_000_000_000 else float(value)
+        try:
+            parsed = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            return None
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if re.fullmatch(r"\d+(?:\.\d+)?", text):
+            return parse_datetime_utc(float(text))
+        normalized = text.replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+    else:
+        return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def infer_free_status(model: dict[str, Any]) -> tuple[bool | None, str, str]:
@@ -284,12 +334,81 @@ def infer_api_calls_30d(model: dict[str, Any]) -> tuple[int | None, str, str]:
     return fallback
 
 
+def infer_created_at(model: dict[str, Any]) -> tuple[str, str]:
+    strong_keys = {
+        "datecreated",
+        "createdat",
+        "created",
+        "creationdate",
+        "datepublished",
+        "publishedat",
+        "publishdate",
+        "releasedate",
+        "releaseat",
+        "releasedat",
+        "launchedat",
+        "launchdate",
+    }
+    weak_keys = {
+        "datemodified",
+        "updatedat",
+        "updated",
+        "modifiedat",
+        "lastmodified",
+        "msgtimestamp",
+    }
+    weak_candidate: tuple[datetime, str] | None = None
+    for path, value in _iter_key_values(model):
+        key = path.split(".")[-1].split("[")[0]
+        normalized_key = re.sub(r"[^a-z0-9]", "", key.lower())
+        parsed = parse_datetime_utc(value)
+        if parsed is None:
+            continue
+        if normalized_key in strong_keys:
+            return _format_utc_datetime(parsed), path
+        if weak_candidate is None and normalized_key in weak_keys:
+            weak_candidate = (parsed, path)
+    if weak_candidate is not None:
+        parsed, path = weak_candidate
+        return _format_utc_datetime(parsed), path
+    return "", "unknown"
+
+
+def enrich_model_heat_metrics(model: NormalizedModel, now: datetime | None = None) -> None:
+    if now is None:
+        now = datetime.now(timezone.utc)
+    created = parse_datetime_utc(model.created_at_utc)
+    if created is None or created > now:
+        model.model_age_days = None
+        model.api_calls_per_day = None
+        model.projected_30d_calls = None
+        model.projected_30d_calls_display = "unknown"
+        return
+
+    age_seconds = max((now - created).total_seconds(), 3600.0)
+    age_days = age_seconds / 86400.0
+    model.model_age_days = round(age_days, 2)
+    if model.api_calls_30d is None:
+        model.api_calls_per_day = None
+        model.projected_30d_calls = None
+        model.projected_30d_calls_display = "unknown"
+        return
+
+    observed_days = min(max(age_days, 1.0), 30.0)
+    calls_per_day = model.api_calls_30d / observed_days
+    projected = int(calls_per_day * 30)
+    model.api_calls_per_day = round(calls_per_day, 2)
+    model.projected_30d_calls = projected
+    model.projected_30d_calls_display = format_human_count(projected)
+
+
 def normalize_model(model: dict[str, Any]) -> NormalizedModel:
     model_id = str(_first_present(model, ("id", "model", "name"), "")).strip()
     model_type = infer_model_type(model)
     is_free, pricing_model, free_reason = infer_free_status(model)
     api_calls_30d, api_calls_30d_display, api_calls_30d_source = infer_api_calls_30d(model)
-    return NormalizedModel(
+    created_at_utc, created_at_source = infer_created_at(model)
+    normalized = NormalizedModel(
         model_id=model_id,
         display_name=str(_deep_first_present(model, ("display_name", "displayName", "name", "id"), model_id)),
         provider=str(_deep_first_present(model, ("provider", "publisher", "organization"), "")),
@@ -325,8 +444,12 @@ def normalize_model(model: dict[str, Any]) -> NormalizedModel:
         api_calls_30d=api_calls_30d,
         api_calls_30d_display=api_calls_30d_display,
         api_calls_30d_source=api_calls_30d_source,
+        created_at_utc=created_at_utc,
+        created_at_source=created_at_source,
         raw=model,
     )
+    enrich_model_heat_metrics(normalized)
+    return normalized
 
 
 def normalize_models(payload: Any) -> list[NormalizedModel]:
@@ -363,6 +486,194 @@ def sort_models_by_api_calls_30d(models: list[NormalizedModel]) -> list[Normaliz
     for index, model in enumerate(ranked, start=1):
         model.usage_rank = index
     return ranked
+
+
+def sort_models_by_trending_heat(models: list[NormalizedModel]) -> list[NormalizedModel]:
+    ranked = sorted(
+        models,
+        key=lambda item: (
+            item.projected_30d_calls is None,
+            -(item.projected_30d_calls or 0),
+            item.model_age_days is None,
+            item.model_age_days or 999999.0,
+            item.model_id.lower(),
+        ),
+    )
+    for index, model in enumerate(ranked, start=1):
+        model.trending_rank = index
+    return ranked
+
+
+def sort_models_by_newest(models: list[NormalizedModel]) -> list[NormalizedModel]:
+    ranked = sorted(
+        models,
+        key=lambda item: (
+            item.model_age_days is None,
+            item.model_age_days or 999999.0,
+            item.api_calls_30d is None,
+            -(item.api_calls_30d or 0),
+            item.model_id.lower(),
+        ),
+    )
+    for index, model in enumerate(ranked, start=1):
+        model.newest_rank = index
+    return ranked
+
+
+def _hybrid_bucket_sizes(total: int, stable_ratio: float, trending_count: int, newest_count: int) -> tuple[int, int, int]:
+    if total <= 0:
+        return 0, 0, 0
+    newest = min(max(newest_count, 0), total)
+    trending = min(max(trending_count, 0), total - newest)
+    stable = max(total - trending - newest, 0)
+    desired_stable = int(round(total * stable_ratio))
+    if desired_stable > stable and trending + newest > 0:
+        take = min(desired_stable - stable, trending + newest)
+        reduce_newest = min(newest, take)
+        newest -= reduce_newest
+        take -= reduce_newest
+        reduce_trending = min(trending, take)
+        trending -= reduce_trending
+        stable = total - trending - newest
+    return stable, trending, newest
+
+
+def select_models_hybrid_topn(
+    models: list[NormalizedModel],
+    top_n: int | None,
+    stable_ratio: float = 0.7,
+    trending_count: int = 4,
+    newest_count: int = 2,
+    new_model_days: float = 14.0,
+) -> ModelSelectionResult:
+    for model in models:
+        model.selection_rank = None
+        model.selection_bucket = ""
+        model.selection_reason = ""
+        enrich_model_heat_metrics(model)
+
+    usage_ranked = sort_models_by_api_calls_30d(models)
+    known_usage_count = sum(1 for model in usage_ranked if model.api_calls_30d is not None)
+    if top_n is None or top_n >= len(usage_ranked):
+        selected = list(usage_ranked)
+        for index, model in enumerate(selected, start=1):
+            model.selection_rank = index
+            model.selection_bucket = "all_candidates"
+            model.selection_reason = "未限制 TopN，检测全部候选模型"
+        return ModelSelectionResult(
+            selected,
+            {
+                "strategy": "all_candidates",
+                "requested_top_n": top_n,
+                "selected_count": len(selected),
+                "stable_count": len(selected),
+                "trending_count": 0,
+                "newest_count": 0,
+                "fallback_fill_count": 0,
+                "known_usage_count": known_usage_count,
+                "models_with_created_at": sum(1 for model in models if model.created_at_utc),
+                "new_model_days": new_model_days,
+            },
+        )
+
+    if known_usage_count <= 0:
+        selected = list(usage_ranked)
+        for index, model in enumerate(selected, start=1):
+            model.selection_rank = index
+            model.selection_bucket = "fallback_no_usage"
+            model.selection_reason = "未获取到 30 天调用量数据，回退检测全部免费候选模型"
+        return ModelSelectionResult(
+            selected,
+            {
+                "strategy": "fallback_no_usage",
+                "requested_top_n": top_n,
+                "selected_count": len(selected),
+                "stable_count": len(selected),
+                "trending_count": 0,
+                "newest_count": 0,
+                "fallback_fill_count": 0,
+                "known_usage_count": known_usage_count,
+                "models_with_created_at": sum(1 for model in models if model.created_at_utc),
+                "new_model_days": new_model_days,
+            },
+        )
+
+    stable_size, trending_size, newest_size = _hybrid_bucket_sizes(top_n, stable_ratio, trending_count, newest_count)
+    trending_candidates = [
+        model
+        for model in sort_models_by_trending_heat(models)
+        if model.projected_30d_calls is not None and model.model_age_days is not None and model.model_age_days <= 30.0
+    ]
+    newest_candidates = [model for model in sort_models_by_newest(models) if model.model_age_days is not None and model.model_age_days <= new_model_days]
+
+    selected: list[NormalizedModel] = []
+    seen: set[str] = set()
+    bucket_counts = {"stable_popular": 0, "trending_new": 0, "newest_free": 0, "fallback_fill": 0}
+
+    def add_from_bucket(candidates: list[NormalizedModel], quota: int, bucket: str, reason_builder) -> None:
+        if quota <= 0:
+            return
+        for candidate in candidates:
+            if len(selected) >= top_n or bucket_counts[bucket] >= quota:
+                break
+            if candidate.model_id in seen:
+                continue
+            selected.append(candidate)
+            seen.add(candidate.model_id)
+            bucket_counts[bucket] += 1
+            candidate.selection_bucket = bucket
+            candidate.selection_reason = reason_builder(candidate)
+
+    add_from_bucket(
+        usage_ranked,
+        stable_size,
+        "stable_popular",
+        lambda item: f"稳定热门池：30 天调用量排名 {item.usage_rank}，调用量 {item.api_calls_30d_display}",
+    )
+    add_from_bucket(
+        trending_candidates,
+        trending_size,
+        "trending_new",
+        lambda item: (
+            f"新晋热门池：折算 30 天调用量 {item.projected_30d_calls_display}，"
+            f"日均 {item.api_calls_per_day or 0:.0f}，年龄 {item.model_age_days} 天"
+        ),
+    )
+    add_from_bucket(
+        newest_candidates,
+        newest_size,
+        "newest_free",
+        lambda item: f"新模型保底池：年龄 {item.model_age_days} 天，30 天调用量 {item.api_calls_30d_display}",
+    )
+    add_from_bucket(
+        usage_ranked,
+        top_n - len(selected),
+        "fallback_fill",
+        lambda item: f"补位池：30 天调用量排名 {item.usage_rank}，调用量 {item.api_calls_30d_display}",
+    )
+
+    for index, model in enumerate(selected, start=1):
+        model.selection_rank = index
+
+    return ModelSelectionResult(
+        selected,
+        {
+            "strategy": "hybrid_topn",
+            "requested_top_n": top_n,
+            "selected_count": len(selected),
+            "stable_count": bucket_counts["stable_popular"],
+            "trending_count": bucket_counts["trending_new"],
+            "newest_count": bucket_counts["newest_free"],
+            "fallback_fill_count": bucket_counts["fallback_fill"],
+            "known_usage_count": known_usage_count,
+            "models_with_created_at": sum(1 for model in models if model.created_at_utc),
+            "new_model_days": new_model_days,
+            "trending_window_days": 30.0,
+            "stable_ratio": stable_ratio,
+            "trending_quota": trending_size,
+            "newest_quota": newest_size,
+        },
+    )
 
 
 def should_test_model(

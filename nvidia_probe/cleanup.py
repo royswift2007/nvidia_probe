@@ -48,7 +48,11 @@ def _ask_console() -> bool:
     print("\n任务已完成。是否保留程序文件？")
     print("输入 y 保留；输入 n 删除程序本体，仅保留测试结果文件。")
     while True:
-        answer = input("保留程序文件？[Y/n]: ").strip().lower()
+        try:
+            answer = input("保留程序文件？[Y/n]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n已取消卸载，默认保留程序文件。")
+            return True
         if answer in ("", "y", "yes"):
             return True
         if answer in ("n", "no"):
@@ -101,14 +105,14 @@ def _contains_protected_path(target: Path, protected: set[Path]) -> bool:
     return False
 
 
-def _write_cleanup_marker(project_root: Path, protected: set[Path]) -> None:
+def _write_cleanup_marker(project_root: Path, protected: set[Path]) -> bool:
     marker = os.getenv("NVIDIA_PROBE_CLEANUP_MARKER")
     if not marker:
-        return
+        return False
 
     resolved_root = project_root.resolve()
     if _contains_protected_path(resolved_root, protected):
-        return
+        return False
 
     marker_path = Path(marker).expanduser().resolve()
     try:
@@ -116,6 +120,8 @@ def _write_cleanup_marker(project_root: Path, protected: set[Path]) -> None:
         marker_path.write_text(str(resolved_root), encoding="utf-8")
     except OSError as exc:
         print(f"无法写入卸载标记文件 {marker_path}: {exc}")
+        return False
+    return True
 
 
 def _delete_target(target: Path) -> None:
@@ -125,11 +131,14 @@ def _delete_target(target: Path) -> None:
         target.unlink()
 
 
-def cleanup_program_files(project_root: Path, result_paths: list[Path]) -> tuple[list[Path], list[tuple[Path, str]]]:
+def cleanup_program_files(project_root: Path, result_paths: list[Path]) -> tuple[list[Path], list[tuple[Path, str]], Path | None]:
     deleted: list[Path] = []
     failures: list[tuple[Path, str]] = []
     protected = {path.resolve() for path in result_paths if path.exists()}
-    _write_cleanup_marker(project_root, protected)
+    resolved_root = project_root.resolve()
+    deferred_root = resolved_root if _write_cleanup_marker(project_root, protected) else None
+    if deferred_root is not None:
+        return deleted, failures, deferred_root
 
     for target in _iter_cleanup_targets(project_root):
         if _contains_protected_path(target, protected):
@@ -143,7 +152,6 @@ def cleanup_program_files(project_root: Path, result_paths: list[Path]) -> tuple
             continue
         deleted.append(target)
 
-    resolved_root = project_root.resolve()
     if resolved_root.exists() and not _contains_protected_path(resolved_root, protected):
         try:
             _delete_target(resolved_root)
@@ -151,7 +159,7 @@ def cleanup_program_files(project_root: Path, result_paths: list[Path]) -> tuple
             failures.append((resolved_root, str(exc)))
         else:
             deleted.append(resolved_root)
-    return deleted, failures
+    return deleted, failures, deferred_root
 
 
 def maybe_cleanup_program(cleanup_prompt: str, project_root: Path, result_paths: list[Path]) -> None:
@@ -159,12 +167,15 @@ def maybe_cleanup_program(cleanup_prompt: str, project_root: Path, result_paths:
     if keep:
         print("已选择保留程序文件。")
         return
-    deleted, failures = cleanup_program_files(project_root, result_paths)
+    deleted, failures, deferred_root = cleanup_program_files(project_root, result_paths)
     if deleted:
         print("已删除程序文件：")
         for path in deleted:
             print(f"- {path}")
-    else:
+    if deferred_root is not None:
+        print("已安排在当前 Python 进程退出后删除程序目录：")
+        print(f"- {deferred_root}")
+    if not deleted and deferred_root is None:
         print("没有发现可删除的程序文件。")
     existing_results = [path for path in result_paths if path.exists()]
     if existing_results:

@@ -24,13 +24,42 @@ def build_parser() -> argparse.ArgumentParser:
         "--top-free-models",
         type=int,
         default=20,
-        help="按 30 天 API 调用量排序后最多测试多少个免费模型；默认 20。",
+        help="混合 TopN 策略下最多测试多少个免费模型；默认 20。",
     )
     run_parser.add_argument("--only-model", default=None, help="只测试指定模型 ID。")
+    run_parser.add_argument(
+        "--no-hybrid-topn",
+        action="store_true",
+        help="关闭混合 TopN，退回只按 30 天 API 调用量排序。",
+    )
+    run_parser.add_argument(
+        "--stable-top-ratio",
+        type=float,
+        default=0.7,
+        help="混合 TopN 中稳定热门模型比例；默认 0.7。",
+    )
+    run_parser.add_argument(
+        "--trending-models",
+        type=int,
+        default=4,
+        help="混合 TopN 中按日均/折算 30 天热度保留的新晋热门模型数量；默认 4。",
+    )
+    run_parser.add_argument(
+        "--newest-models",
+        type=int,
+        default=2,
+        help="混合 TopN 中最近上架免费模型保底数量；默认 2。",
+    )
+    run_parser.add_argument(
+        "--new-model-days",
+        type=float,
+        default=14.0,
+        help="多少天内上架的模型视为新模型；默认 14。",
+    )
     run_parser.add_argument("--include-types", default="chat,embedding,reranker", help="逗号分隔的测试类型。")
     run_parser.add_argument("--exclude-types", default="image,video,audio", help="逗号分隔的跳过类型。")
-    run_parser.add_argument("--delay-min", type=float, default=30.0, help="模型测试间隔下限，单位秒；默认安全优先。")
-    run_parser.add_argument("--delay-max", type=float, default=75.0, help="模型测试间隔上限，单位秒；默认安全优先。")
+    run_parser.add_argument("--delay-min", type=float, default=10.0, help="模型测试间隔下限，单位秒；默认 10。")
+    run_parser.add_argument("--delay-max", type=float, default=25.0, help="模型测试间隔上限，单位秒；默认 25。")
     run_parser.add_argument("--timeout", type=float, default=60.0, help="单请求超时时间，单位秒。")
     run_parser.add_argument("--retries", type=int, default=0, help="失败重试次数；默认 0，避免重复触发限制。")
     run_parser.add_argument("--max-output-tokens", type=int, default=8, help="测试请求最大输出 token；默认 8，降低请求成本。")
