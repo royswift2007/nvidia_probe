@@ -105,7 +105,7 @@ def resolve_api_key(args: argparse.Namespace) -> str:
         )
 
     print("需要 NVIDIA API Key 才能拉取模型列表并测试模型；不会把 Key 写入报告或状态文件。")
-    api_key = getpass.getpass("请输入 NVIDIA API Key（输入不可见）: ").strip()
+    api_key = getpass.getpass("\033[1;33m请输入 NVIDIA API Key（输入不可见）: \033[0m").strip()
     if not api_key:
         raise SystemExit("未输入 NVIDIA API Key，已停止。")
     return api_key

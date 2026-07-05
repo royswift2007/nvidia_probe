@@ -158,7 +158,7 @@ prompt_api_key_if_needed() {
     exit 1
   fi
 
-  printf '[nvidia-probe] 请输入 NVIDIA API Key（输入不可见）: '
+  printf '\033[1;33m[nvidia-probe] 请输入 NVIDIA API Key（输入不可见）: \033[0m'
   IFS= read -r -s NVIDIA_API_KEY
   printf '\n'
 
