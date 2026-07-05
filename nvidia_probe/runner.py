@@ -229,15 +229,20 @@ def run_probe(config: ProbeConfig, project_root: Path) -> int:
                     trending_count=config.trending_models,
                     newest_count=config.newest_models,
                     new_model_days=config.new_model_days,
+                    priority_model_ids=config.priority_models,
                 )
                 models = selection.models
                 state["selection_summary"] = selection.summary
                 if selection.summary.get("strategy") == "hybrid_topn":
+                    priority_count = int(selection.summary.get("priority_count") or 0)
+                    priority_extra_count = int(selection.summary.get("priority_extra_count") or 0)
+                    priority_label = f"，重要中文模型={priority_count}（额外加入={priority_extra_count}）" if priority_count else ""
                     topn_message = (
                         "已使用混合 TopN 策略选择候选模型："
                         f"稳定热门={selection.summary.get('stable_count')}，"
                         f"新晋热门={selection.summary.get('trending_count')}，"
-                        f"新模型保底={selection.summary.get('newest_count')}，"
+                        f"新模型保底={selection.summary.get('newest_count')}"
+                        f"{priority_label}，"
                         f"已选={selection.summary.get('selected_count')}。"
                     )
                 elif selection.summary.get("strategy") == "fallback_no_usage":

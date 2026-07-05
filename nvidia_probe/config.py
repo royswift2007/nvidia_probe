@@ -13,6 +13,7 @@ DEFAULT_OUTPUT_DIR = "results"
 DEFAULT_INCLUDE_TYPES = ("chat", "embedding", "reranker")
 DEFAULT_SKIP_TYPES = ("image", "video", "audio")
 DEFAULT_BUILD_CATALOG_URL = "https://build.nvidia.com/models?filters=nimType%3Anim_type_preview"
+DEFAULT_PRIORITY_MODELS = ("deepseek", "kimi", "glm", "minimax")
 
 
 @dataclass(slots=True)
@@ -31,6 +32,7 @@ class ProbeConfig:
     trending_models: int = 6
     newest_models: int = 0
     new_model_days: float = 14.0
+    priority_models: tuple[str, ...] = DEFAULT_PRIORITY_MODELS
     include_types: tuple[str, ...] = DEFAULT_INCLUDE_TYPES
     exclude_types: tuple[str, ...] = DEFAULT_SKIP_TYPES
     delay_min: float = 10.0
@@ -83,6 +85,14 @@ def parse_csv_tuple(value: str | Iterable[str] | None, default: tuple[str, ...])
     return tuple(items) if items else default
 
 
+def parse_priority_models(value: str | Iterable[str] | None, default: tuple[str, ...]) -> tuple[str, ...]:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return tuple(part.strip().lower() for part in value.split(",") if part.strip())
+    return tuple(str(part).strip().lower() for part in value if str(part).strip())
+
+
 def resolve_api_key(args: argparse.Namespace) -> str:
     api_key = args.api_key or os.getenv("NVIDIA_API_KEY") or os.getenv("NGC_API_KEY")
     if api_key:
@@ -118,6 +128,7 @@ def build_probe_config(args: argparse.Namespace) -> ProbeConfig:
         trending_models=int(args.trending_models),
         newest_models=int(args.newest_models),
         new_model_days=float(args.new_model_days),
+        priority_models=parse_priority_models(args.priority_models, DEFAULT_PRIORITY_MODELS),
         include_types=parse_csv_tuple(args.include_types, DEFAULT_INCLUDE_TYPES),
         exclude_types=parse_csv_tuple(args.exclude_types, DEFAULT_SKIP_TYPES),
         delay_min=float(args.delay_min),

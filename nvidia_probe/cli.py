@@ -24,7 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--top-free-models",
         type=int,
         default=20,
-        help="混合 TopN 策略下最多测试多少个免费模型；默认 20。",
+        help="混合 TopN 基础池测试多少个免费模型；重要中文模型会在基础池外额外加入。默认 20。",
     )
     run_parser.add_argument("--only-model", default=None, help="只测试指定模型 ID。")
     run_parser.add_argument(
@@ -55,6 +55,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=14.0,
         help="多少天内上架的模型视为新模型；默认 14。",
+    )
+    run_parser.add_argument(
+        "--priority-models",
+        default="deepseek,kimi,glm,minimax",
+        help="逗号分隔的重要中文模型关键词/通配符/ID；混合 TopN 会在 TopN 外额外加入匹配模型，留空可关闭。默认 deepseek,kimi,glm,minimax。",
     )
     run_parser.add_argument("--include-types", default="chat,embedding,reranker", help="逗号分隔的测试类型。")
     run_parser.add_argument("--exclude-types", default="image,video,audio", help="逗号分隔的跳过类型。")

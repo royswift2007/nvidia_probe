@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import html
 import re
 from dataclasses import dataclass, field
@@ -884,6 +885,30 @@ def _hybrid_bucket_sizes(total: int, stable_ratio: float, trending_count: int, n
     return stable, trending, newest
 
 
+def _matches_priority_model(model: NormalizedModel, patterns: tuple[str, ...]) -> bool:
+    texts = (
+        model.model_id.lower(),
+        model.display_name.lower(),
+        model.provider.lower(),
+        model.owned_by.lower(),
+    )
+    for pattern in patterns:
+        normalized_pattern = pattern.strip().lower()
+        if not normalized_pattern:
+            continue
+        has_wildcard = any(char in normalized_pattern for char in "*?[]")
+        for text in texts:
+            if not text:
+                continue
+            if text == normalized_pattern:
+                return True
+            if has_wildcard and fnmatch.fnmatchcase(text, normalized_pattern):
+                return True
+            if not has_wildcard and normalized_pattern in text:
+                return True
+    return False
+
+
 def select_models_hybrid_topn(
     models: list[NormalizedModel],
     top_n: int | None,
@@ -891,6 +916,7 @@ def select_models_hybrid_topn(
     trending_count: int = 6,
     newest_count: int = 0,
     new_model_days: float = 14.0,
+    priority_model_ids: tuple[str, ...] = (),
 ) -> ModelSelectionResult:
     for model in models:
         model.selection_rank = None
@@ -945,6 +971,8 @@ def select_models_hybrid_topn(
         )
 
     stable_size, trending_size, newest_size = _hybrid_bucket_sizes(top_n, stable_ratio, trending_count, newest_count)
+    priority_patterns = tuple(pattern.strip().lower() for pattern in priority_model_ids if pattern.strip())
+    priority_candidates = [model for model in usage_ranked if _matches_priority_model(model, priority_patterns)]
     trending_heat_ranked = sort_models_by_trending_heat(models)
     newest_ranked = sort_models_by_newest(models)
     strict_trending_candidates = [
@@ -975,7 +1003,7 @@ def select_models_hybrid_topn(
 
     selected: list[NormalizedModel] = []
     seen: set[str] = set()
-    bucket_counts = {"stable_popular": 0, "trending_new": 0, "newest_free": 0, "fallback_fill": 0}
+    bucket_counts = {"priority_model": 0, "stable_popular": 0, "trending_new": 0, "newest_free": 0, "fallback_fill": 0}
 
     def reserve_bucket(candidates: list[NormalizedModel], quota: int, reserved_ids: set[str] | None = None) -> list[NormalizedModel]:
         if quota <= 0:
@@ -1065,6 +1093,20 @@ def select_models_hybrid_topn(
             lambda item: trending_reason(item).replace("新晋热门池", "新晋热门池扩展", 1),
         )
 
+    for candidate in priority_candidates:
+        if candidate.model_id in seen:
+            continue
+        selected.append(candidate)
+        seen.add(candidate.model_id)
+        bucket_counts["priority_model"] += 1
+        candidate.selection_bucket = "priority_model"
+        candidate.selection_reason = (
+            "重要中文模型额外检测：匹配 --priority-models，"
+            f"30 天调用量排名 {candidate.usage_rank}，调用量 {candidate.api_calls_30d_display}"
+        )
+
+    priority_selected_count = sum(1 for model in selected if _matches_priority_model(model, priority_patterns))
+
     for index, model in enumerate(selected, start=1):
         model.selection_rank = index
 
@@ -1074,7 +1116,10 @@ def select_models_hybrid_topn(
             "strategy": "hybrid_topn",
             "requested_top_n": top_n,
             "selected_count": len(selected),
+            "priority_count": priority_selected_count,
+            "priority_extra_count": bucket_counts["priority_model"],
             "stable_count": bucket_counts["stable_popular"],
+            "stable_popular_count": bucket_counts["stable_popular"],
             "trending_count": bucket_counts["trending_new"],
             "newest_count": bucket_counts["newest_free"],
             "fallback_fill_count": bucket_counts["fallback_fill"],
@@ -1087,6 +1132,8 @@ def select_models_hybrid_topn(
             "trending_strict_candidate_count": len(strict_trending_candidates),
             "trending_candidate_count": len(trending_candidates),
             "newest_quota": newest_size,
+            "priority_models": sorted(priority_patterns),
+            "priority_candidate_count": len(priority_candidates),
         },
     )
 
