@@ -6,7 +6,7 @@ from typing import Any
 
 from .build_catalog import apply_build_catalog_to_models, enrich_token_specs_from_build_pages, fetch_free_endpoint_catalog
 from .client import NvidiaApiClient
-from .cleanup import maybe_cleanup_program
+from .cleanup import maybe_cleanup_program, maybe_cleanup_program_after_interrupt
 from .config import ProbeConfig
 from .environment import collect_environment
 from .models import NormalizedModel, normalize_models, select_models_hybrid_topn, should_test_model, sort_models_by_api_calls_30d
@@ -141,6 +141,7 @@ def run_probe(config: ProbeConfig, project_root: Path) -> int:
     )
 
     cleanup_allowed = False
+    interrupted = False
     try:
         _print_progress("正在拉取 NVIDIA 模型列表...")
         models_response = client.get_models()
@@ -432,11 +433,14 @@ def run_probe(config: ProbeConfig, project_root: Path) -> int:
         cleanup_allowed = True
         return 0
     except KeyboardInterrupt:
+        interrupted = True
         state["abort_reason"] = "用户中断任务，已停止后续模型检测。"
         save_state(config.state_file, state)
-        _print_progress("检测已被用户中断，已保存当前状态；本次不会执行程序卸载。")
+        _print_progress("检测已被用户中断，已保存当前状态。")
         return 130
     finally:
         client.close()
         if cleanup_allowed and config.cleanup_prompt != "never":
             maybe_cleanup_program(config.cleanup_prompt, project_root, _result_paths(config))
+        elif interrupted and config.cleanup_prompt != "never":
+            maybe_cleanup_program_after_interrupt(config.cleanup_prompt, project_root, _result_paths(config))

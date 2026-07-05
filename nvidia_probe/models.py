@@ -956,13 +956,35 @@ def select_models_hybrid_topn(
     seen: set[str] = set()
     bucket_counts = {"stable_popular": 0, "trending_new": 0, "newest_free": 0, "fallback_fill": 0}
 
-    def add_from_bucket(candidates: list[NormalizedModel], quota: int, bucket: str, reason_builder) -> None:
+    def reserve_bucket(candidates: list[NormalizedModel], quota: int, reserved_ids: set[str] | None = None) -> list[NormalizedModel]:
+        if quota <= 0:
+            return []
+        excluded = reserved_ids or set()
+        reserved: list[NormalizedModel] = []
+        local_seen: set[str] = set()
+        for candidate in candidates:
+            if len(reserved) >= quota:
+                break
+            if candidate.model_id in excluded or candidate.model_id in local_seen:
+                continue
+            reserved.append(candidate)
+            local_seen.add(candidate.model_id)
+        return reserved
+
+    def add_from_bucket(
+        candidates: list[NormalizedModel],
+        quota: int,
+        bucket: str,
+        reason_builder,
+        excluded_ids: set[str] | None = None,
+    ) -> None:
         if quota <= 0:
             return
+        excluded = excluded_ids or set()
         for candidate in candidates:
             if len(selected) >= top_n or bucket_counts[bucket] >= quota:
                 break
-            if candidate.model_id in seen:
+            if candidate.model_id in seen or candidate.model_id in excluded:
                 continue
             selected.append(candidate)
             seen.add(candidate.model_id)
@@ -970,14 +992,21 @@ def select_models_hybrid_topn(
             candidate.selection_bucket = bucket
             candidate.selection_reason = reason_builder(candidate)
 
+    reserved_for_non_stable: set[str] = set()
+    reserved_trending = reserve_bucket(trending_candidates, trending_size, reserved_for_non_stable)
+    reserved_for_non_stable.update(model.model_id for model in reserved_trending)
+    reserved_newest = reserve_bucket(newest_candidates, newest_size, reserved_for_non_stable)
+    reserved_for_non_stable.update(model.model_id for model in reserved_newest)
+
     add_from_bucket(
         usage_ranked,
         stable_size,
         "stable_popular",
         lambda item: f"稳定热门池：30 天调用量排名 {item.usage_rank}，调用量 {item.api_calls_30d_display}",
+        excluded_ids=reserved_for_non_stable,
     )
     add_from_bucket(
-        trending_candidates,
+        reserved_trending,
         trending_size,
         "trending_new",
         lambda item: (
@@ -986,7 +1015,7 @@ def select_models_hybrid_topn(
         ),
     )
     add_from_bucket(
-        newest_candidates,
+        reserved_newest,
         newest_size,
         "newest_free",
         lambda item: f"新模型保底池：年龄 {item.model_age_days} 天，30 天调用量 {item.api_calls_30d_display}",

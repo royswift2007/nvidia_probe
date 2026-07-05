@@ -46,6 +46,31 @@ def _ask_tkinter() -> bool | None:
         return None
 
 
+def _ask_tkinter_delete_after_interrupt() -> bool | None:
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+    except Exception:  # noqa: BLE001 - tkinter may not exist on remote servers
+        return None
+
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        delete = messagebox.askyesno(
+            "NVIDIA Model Probe",
+            "检测已被 Ctrl+C 中断。是否删除程序文件？\n\n"
+            "删除程序文件只会卸载工具本体，不会删除已经生成的检测结果。\n"
+            "默认操作是不删除程序，方便稍后继续运行或断点续跑。\n"
+            "只有选择“是”才会删除程序文件；选择“否”或关闭窗口都会保留程序本体。",
+            default=messagebox.NO,
+        )
+        root.destroy()
+        return bool(delete)
+    except Exception:  # noqa: BLE001 - headless servers usually fail here
+        return None
+
+
 def _ask_console() -> bool:
     if not sys.stdin.isatty():
         print("当前不是交互式终端，无法输入 y，默认删除程序本体，仅保留测试结果文件。")
@@ -68,6 +93,27 @@ def _ask_console() -> bool:
         print("请输入 y 保留，或直接回车删除。")
 
 
+def _ask_console_delete_after_interrupt() -> bool:
+    if not sys.stdin.isatty():
+        print("检测已被 Ctrl+C 中断；当前不是交互式终端，默认不删除程序文件。")
+        return False
+    print("\n检测已被 Ctrl+C 中断。是否删除程序文件？")
+    print("删除程序文件只会卸载工具本体，不会删除已经生成的检测结果。")
+    print("默认操作：直接回车或再次 Ctrl+C 将不删除程序，方便稍后继续运行或断点续跑。")
+    print("只有输入 y 或 yes 才会删除程序文件。")
+    while True:
+        try:
+            answer = input("删除程序文件？输入 y 删除，直接回车保留 [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n未输入 y，默认不删除程序文件；检测结果和程序本体都会保留。")
+            return False
+        if answer in ("y", "yes"):
+            return True
+        if answer in ("", "n", "no"):
+            return False
+        print("请输入 y 删除，或直接回车保留。")
+
+
 def should_keep_program(cleanup_prompt: str) -> bool:
     if cleanup_prompt == "never":
         return True
@@ -82,6 +128,22 @@ def should_keep_program(cleanup_prompt: str) -> bool:
             return keep
         return _ask_console()
     return True
+
+
+def should_delete_program_after_interrupt(cleanup_prompt: str) -> bool:
+    if cleanup_prompt == "never":
+        return False
+    if cleanup_prompt == "always":
+        delete = _ask_tkinter_delete_after_interrupt()
+        if delete is not None:
+            return delete
+        return _ask_console_delete_after_interrupt()
+    if cleanup_prompt == "auto":
+        delete = _ask_tkinter_delete_after_interrupt()
+        if delete is not None:
+            return delete
+        return _ask_console_delete_after_interrupt()
+    return False
 
 
 def _iter_cleanup_targets(project_root: Path):
@@ -175,6 +237,18 @@ def maybe_cleanup_program(cleanup_prompt: str, project_root: Path, result_paths:
     if keep:
         print("已选择保留程序文件。")
         return
+    _cleanup_and_print_result(project_root, result_paths)
+
+
+def maybe_cleanup_program_after_interrupt(cleanup_prompt: str, project_root: Path, result_paths: list[Path]) -> None:
+    delete = should_delete_program_after_interrupt(cleanup_prompt)
+    if not delete:
+        print("已保留程序文件。")
+        return
+    _cleanup_and_print_result(project_root, result_paths)
+
+
+def _cleanup_and_print_result(project_root: Path, result_paths: list[Path]) -> None:
     deleted, failures, deferred_root = cleanup_program_files(project_root, result_paths)
     if deleted:
         print("已删除程序文件：")

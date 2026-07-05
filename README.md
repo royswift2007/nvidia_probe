@@ -13,7 +13,8 @@
 - 保存断点 JSON，支持中断后继续。
 - 运行时实时输出 free 模型数量、计划检测数量、当前模型、结果和累计进度。
 - 输出 CSV、JSON，安装 openpyxl 后输出 Excel。
-- 执行完成后弹出或提示是否保留程序；默认删除程序文件，仅输入 y/yes 或选择“是”才保留程序文件。
+- 任务正常完成后弹出或提示是否保留程序；默认删除程序文件，仅输入 y/yes 或选择“是”才保留程序文件。
+- 任务检测过程中按 Ctrl+C 中断时会保存当前状态并询问是否删除程序；默认不删除，方便稍后断点续跑。
 
 ## 远程服务器一条命令运行
 
@@ -37,7 +38,7 @@ bash -c "$(wget -qO- https://raw.githubusercontent.com/royswift2007/nvidia_probe
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/royswift2007/nvidia_probe/main/scripts/run_remote.sh)" nvidia-probe --top-free-models 3
 ```
 
-默认运行结束后会询问是否卸载程序。一键运行时，测试结果默认保存到当前目录的 `nvidia_probe_results`，程序安装目录默认是当前目录的 `.nvidia_probe`。选择卸载时会在 Python 进程退出后删除 `.nvidia_probe` 整个程序目录，只保留 `nvidia_probe_results` 中的测试结果。若想运行后不询问卸载，可追加参数：
+默认正常运行结束后会询问是否卸载程序。一键运行时，测试结果默认保存到当前目录的 `nvidia_probe_results`，程序安装目录默认是当前目录的 `.nvidia_probe`。选择卸载时会在 Python 进程退出后删除 `.nvidia_probe` 整个程序目录，只保留 `nvidia_probe_results` 中的测试结果。如果检测过程中按 Ctrl+C 中断，会改为询问是否删除程序，默认不删除。若想运行后不询问卸载，可追加参数：
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/royswift2007/nvidia_probe/main/scripts/run_remote.sh)" nvidia-probe --cleanup-prompt never
@@ -120,45 +121,178 @@ export NVIDIA_API_KEY="你的 NVIDIA API Key"
 
 非交互式环境，例如后台脚本、CI、cron、systemd，必须提前设置 `NVIDIA_API_KEY`，否则无法安全提示输入。
 
-## 默认测试数量策略
+## 完整规则与参数
 
-默认不会测试全部免费模型，而是先拉取模型列表，再只保留可确认免费的模型，然后使用“混合 TopN”策略默认选择 20 个模型：
+本节按当前真实代码整理，覆盖 `run`、`merge`、远程一键脚本、模型筛选、请求、限流、输出和自清理规则。
 
-1. 稳定热门池：优先保留长期 30 天 API 调用量靠前的模型。
-2. 新晋热门池：优先保留最近 30 天内上架、日均调用量高、折算 30 天热度高的新模型。
-3. 新模型保底池：默认不占名额；如果你想额外保留刚上架但调用量还没起来的新模型，可以通过 `--newest-models` 手动开启。
+### `run` 命令参数
 
-默认 Top20 配比大致是：稳定热门 14 个、新晋热门 6 个、新模型保底 0 个，不再使用“补位池”把名额回填给普通老模型。这样既保留高请求数量的老模型，也能覆盖类似 `z-ai/glm-5.2` 这种刚上架但增长很快的新模型，同时不增加测试请求总量。如果新晋热门候选不足，工具不会再用普通老模型补位，本次实际测试数量可能少于 `--top-free-models`。
+| 参数 | 默认值 | 规则 |
+|---|---:|---|
+| `-h` / `--help` | 自动生成 | 显示 `run` 命令帮助并退出。 |
+| `--api-key` | 空 | NVIDIA API Key。优先级高于环境变量；不会写入报告或状态文件。 |
+| `--base-url` | `https://integrate.api.nvidia.com/v1` | NVIDIA OpenAI-compatible API Base URL；也可用 `NVIDIA_BASE_URL` 覆盖。 |
+| `--output-dir` | `results` | 输出目录。会生成 `probe_state.json`、`nvidia_models_report.csv`、`nvidia_models_report.xlsx`。 |
+| `--limit` | 空 | 在 TopN/混合筛选之后再截断本次处理模型数量。 |
+| `--top-free-models` | `20` | 混合 TopN 或调用量排序策略下最多选择多少个免费候选模型；必须大于 0。 |
+| `--only-model` | 空 | 只测试指定模型 ID；仍会走免费/类型规则，除非同时调整相关参数。 |
+| `--no-hybrid-topn` | 关闭 | 关闭混合 TopN，退回只按 30 天 API 调用量排序。 |
+| `--stable-top-ratio` | `0.7` | 混合 TopN 中稳定热门模型比例；必须在 0 到 1 之间。 |
+| `--trending-models` | `6` | 混合 TopN 中新晋热门模型配额；不能为负数。 |
+| `--newest-models` | `0` | 混合 TopN 中最近上架模型保底配额；不能为负数。 |
+| `--new-model-days` | `14.0` | 多少天内上架视为新模型；必须大于 0。 |
+| `--include-types` | `chat,embedding,reranker` | 只允许这些模型类型进入测试，逗号分隔。 |
+| `--exclude-types` | `image,video,audio` | 跳过这些模型类型，逗号分隔；排除规则优先于包含规则。 |
+| `--delay-min` | `10.0` | 两个模型真实调用之间的随机等待下限，单位秒；不能为负数。 |
+| `--delay-max` | `25.0` | 两个模型真实调用之间的随机等待上限，单位秒；不能小于 `--delay-min`。 |
+| `--timeout` | `60.0` | 单个 HTTP 请求超时时间，单位秒。 |
+| `--retries` | `0` | 单模型失败重试次数；不能为负数。默认 0，避免重复触发限制。 |
+| `--max-output-tokens` | `8` | chat 探测请求的 `max_tokens`；必须大于 0。 |
+| `--rate-limit-sleep` | `600.0` | 只有显式允许 429 后继续时，遇到 429 的暂停秒数。 |
+| `--consecutive-429-breaker` | `1` | 连续 429 熔断阈值。默认配合“首次 429 立即停止”。 |
+| `--consecutive-403-breaker` | `5` | 连续 403/地区或权限限制熔断阈值。 |
+| `--consecutive-network-breaker` | `10` | 连续网络错误熔断阈值。 |
+| `--continue-after-429` | 关闭 | 关闭“首次 429 立即停止”；不建议使用。 |
+| `--dry-run` | 关闭 | 只拉取、筛选、导出模型元数据，不真实调用模型。 |
+| `--resume` | 关闭 | 读取已有 `probe_state.json` 断点续跑；默认跳过已完成模型。 |
+| `--force-retest` | 关闭 | 配合 `--resume` 时，忽略已有结果并重新测试。 |
+| `--no-ip-lookup` | 关闭 | 禁用公网 IP 地理信息查询。 |
+| `--strict-safe` | 关闭 | 启用更保守安全默认值：请求间隔至少 60–120 秒，重试 0，测试输出 token 不超过 8，429 暂停至少 900 秒，首次 429 停止。 |
+| `--no-free-only` | 关闭 | 关闭“只测试可确认免费模型”。不建议使用。 |
+| `--allow-unknown-cost` | 关闭 | 允许测试费用未知模型。不建议使用。 |
+| `--no-build-catalog` | 关闭 | 不抓取 NVIDIA Build Free Endpoint 页面辅助识别免费模型。不建议使用。 |
+| `--build-catalog-url` | `https://build.nvidia.com/models?filters=nimType%3Anim_type_preview` | NVIDIA Build Free Endpoint 目录页 URL。 |
+| `--no-model-details` | 关闭 | 不抓取单模型 Build 详情页补全上下文长度和最大输出 token。 |
+| `--detail-delay-min` | `1.0` | 单模型 Build 详情页抓取间隔下限，单位秒；不能为负数。 |
+| `--detail-delay-max` | `3.0` | 单模型 Build 详情页抓取间隔上限，单位秒；不能小于 `--detail-delay-min`。 |
+| `--cleanup-prompt` | `auto` | `auto`/`always` 会在任务完成后询问是否保留程序；`never` 不询问并保留程序。 |
 
-如果 NVIDIA 模型列表接口没有返回任何 30 天调用量字段，工具会把调用量标记为 `unknown`，并回退为检测全部可确认免费的候选模型。
+### `merge` 命令参数
 
-默认会额外抓取 NVIDIA Build 的 Free Endpoint 页面 `https://build.nvidia.com/models?filters=nimType%3Anim_type_preview`，该页面当前搜索总数约为 77 个 Free Endpoint 模型。工具会按页面分页抓取完整目录，把 `Free Endpoint` 标记、`last_month_api_invocation_count` 和 `dateCreated` 回填到 API 模型列表，再只测试匹配到的免费模型。这样不会把 API `/models` 返回的 121 个费用未知模型全部当成免费模型。
+| 参数 | 默认值 | 规则 |
+|---|---:|---|
+| `-h` / `--help` | 自动生成 | 显示 `merge` 命令帮助并退出。 |
+| `--inputs` | 必填 | 多个服务器生成的 `probe_state.json` 文件路径。 |
+| `--output-dir` | `merged` | 合并报告输出目录，生成 `merge_report.csv` 和可选 `merge_report.xlsx`。 |
 
-由于 NVIDIA `/models` 接口和 Build Free Endpoint 列表页通常不直接提供上下文长度、最大输出 token 这类规格，工具默认会在最终 TopN/limit 候选模型确定后，再以 1 到 3 秒随机间隔低频抓取对应的单模型 Build 详情页，尽量从详情页文本和请求 schema 中补全 `context_length` 与 `max_output_tokens`。如需关闭详情页补全，可传入 `--no-model-details`；如需调整详情页抓取间隔，可使用 `--detail-delay-min` 和 `--detail-delay-max`。
+### 远程一键脚本环境变量
 
-可以自定义测试数量：
+| 环境变量 | 默认值 | 规则 |
+|---|---:|---|
+| `NVIDIA_PROBE_REPO_URL` | `https://github.com/royswift2007/nvidia_probe.git` | 一键脚本克隆/更新的仓库地址。 |
+| `NVIDIA_PROBE_BRANCH` | `main` | 克隆/更新的分支。 |
+| `NVIDIA_PROBE_INSTALL_DIR` | 当前目录下 `.nvidia_probe` | 程序安装目录。 |
+| `NVIDIA_PROBE_RESULT_DIR` | 当前目录下 `nvidia_probe_results` | 结果目录，默认在安装目录外，卸载程序时不会删除。 |
+| `NVIDIA_PROBE_CLEANUP_MARKER` | 当前目录下 `.nvidia_probe_cleanup_marker` | 一键脚本用于延迟删除安装目录的标记文件。 |
+| `PYTHON` | `python3` | 一键脚本使用的 Python 命令。 |
+| `NVIDIA_API_KEY` | 空 | API Key；如果未设置且是交互终端，会隐藏提示输入。 |
+| `NGC_API_KEY` | 空 | API Key 备用环境变量。 |
+| `NVIDIA_BASE_URL` | 空 | 可覆盖默认 API Base URL。 |
 
-```powershell
-nvidia-probe run --top-free-models 10 --cleanup-prompt never
-```
+### 运行流程规则
 
-如果确实要测试更多免费模型：
+1. 收集环境信息：主机名、公网 IP/地区、系统、Python 版本、代理变量等；如传入 `--no-ip-lookup` 则跳过公网 IP 查询。
+2. 拉取 NVIDIA API `/models`，失败则保存 `abort_reason` 并停止。
+3. 归一化模型：推断模型类型、免费状态、30 天调用量、上架时间、能力标签、token 规格等。
+4. 默认抓取 NVIDIA Build Free Endpoint 目录，分页解析约 77 个 Free Endpoint 模型，并把免费标记、30 天调用量、上架时间、能力标签回填到 API 模型。
+5. 根据免费规则和类型规则构造候选模型。
+6. 默认使用混合 TopN 选择最终候选；如果关闭混合 TopN，则只按 30 天调用量排序。
+7. 如果设置 `--limit`，在 TopN/混合筛选之后再截断。
+8. 默认对最终候选模型低频抓取单模型 Build 详情页，补全 `context_length` 和 `max_output_tokens`。
+9. 如果不是 `--dry-run`，按顺序串行真实调用每个模型，模型之间随机等待 `--delay-min` 到 `--delay-max` 秒。
+10. 每个模型完成后立即写入 `probe_state.json`，支持中断后续跑。
+11. 任务结束后写出 JSON、CSV、Excel，并按 `--cleanup-prompt` 决定是否卸载程序本体。
 
-```powershell
-nvidia-probe run --top-free-models 50 --cleanup-prompt never
-```
+### 模型类型与请求规则
 
-也可以调整混合 TopN 配比：
+| 模型类型 | 测试接口 | 请求内容 |
+|---|---|---|
+| `chat` 或其他默认文本模型 | `POST /chat/completions` | `messages=[{"role":"user","content":"Reply with exactly: OK"}]`，`temperature=0`，`max_tokens=--max-output-tokens`，`stream=false`。 |
+| `embedding` | `POST /embeddings` | `input="hello"`。如果成功，会记录向量维度。 |
+| `reranker` | `POST /ranking` | 先尝试 `query` + `documents` 格式；如果 400/404/422，再尝试 `input.query` + `input.documents` 格式。 |
 
-```powershell
-nvidia-probe run --top-free-models 20 --stable-top-ratio 0.7 --trending-models 6 --newest-models 0 --new-model-days 14
-```
+模型类型推断规则：模型元数据或模型 ID 中包含 `embedding`/`embed`/`retrieval` 视为 `embedding`；包含 `rerank`/`ranking`/`ranker` 视为 `reranker`；包含 `vision`/`vlm`/`multimodal`/`ocr` 视为 `vision`；包含 `image`/`diffusion`/`sdxl`/`flux` 视为 `image`；包含 `video` 视为 `video`；包含 `audio`/`speech`/`tts`/`asr` 视为 `audio`；包含 `chat`/`instruct`/`llm`/`language`/`completion`/`reasoning` 或无法识别时按 `chat` 处理。
 
-如需退回旧逻辑，只按 30 天总调用量排序：
+### 免费模型识别规则
 
-```powershell
-nvidia-probe run --no-hybrid-topn --top-free-models 20
-```
+默认 `free_only=true`，只有可确认免费模型才会测试：
+
+- 优先使用 Build Free Endpoint 目录；匹配到目录中的模型会标记为免费。
+- API 元数据中出现明确免费键或值也会视为免费，例如 `free`、`is_free`、`free_endpoint`、`free_tier`、`no_cost`、`zero_cost`、`price=0`。
+- API 元数据中出现明确付费键或值会视为非免费，例如 `paid`、`billable`、`metered`、`requires_payment`、`requires_billing`、`positive price`。
+- 费用未知模型默认跳过；只有传入 `--allow-unknown-cost` 才会测试。
+- 传入 `--no-free-only` 会关闭免费过滤，不建议使用。
+
+### 混合 TopN 选择规则
+
+默认 `--top-free-models 20 --stable-top-ratio 0.7 --trending-models 6 --newest-models 0 --new-model-days 14`：
+
+1. 先按 30 天 API 调用量排序，并记录 `usage_rank`。
+2. 如果 `--top-free-models` 为空或大于等于候选总数，则检测全部候选。
+3. 如果完全没有 30 天调用量数据，则回退为检测全部可确认免费的候选模型。
+4. 否则计算三个池的配额：新模型保底池最多 `--newest-models`；新晋热门池最多 `--trending-models`；剩余名额给稳定热门池，同时尽量满足 `--stable-top-ratio`。默认 Top20 会得到 14 个稳定热门池 + 6 个新晋热门池 + 0 个新模型保底。
+5. 新晋热门池会先被预留：只取模型年龄不超过 30 天、且可计算折算 30 天调用量的模型，按折算 30 天调用量排序；这些模型不会再被稳定热门池提前占用。
+6. 新模型保底池也会预留：只取模型年龄不超过 `--new-model-days` 的模型，按年龄更小优先，再按 30 天调用量排序；已预留的新晋热门模型不会重复计入新模型保底池。
+7. 稳定热门池按 30 天调用量排序，并跳过已经预留给新晋热门池/新模型保底池的模型，避免新晋热门配额被稳定池吃掉。
+8. 如果稳定热门、新晋热门、新模型保底之后仍未达到 TopN，不再用普通老模型补位，只会继续从新晋热门候选扩展；因此实际测试数量可能少于 `--top-free-models`。
+9. 传入 `--no-hybrid-topn` 后，如果存在 30 天调用量数据，就只取调用量排名前 `--top-free-models`；如果没有调用量数据，则检测全部候选。
+
+### token 规格与能力标签规则
+
+- 上下文长度和最大输出 token 先从 API `/models` 元数据递归扫描。
+- Build Free Endpoint 目录描述中如果出现 `1M`、`256K`、`262,144` 等上下文信息，也会回填。
+- 默认对最终候选模型抓取单模型 Build 详情页，解析文本中的 context 信息，以及 schema 中的 `max_tokens.maximum`。
+- 如果仍无法获取，会使用内置已知模型规格兜底表；例如 `z-ai/glm-5.2` 可补 `context_length=1000000` 和 `max_output_tokens=32768`。
+- 能力标签来自 API/Build 元数据里的 `general`、`usecase`、`cloudPartnerType`、`playgroundType`。包含 `vision`、`vlm`、`ocr`、`multimodal` 等视为图像/视觉；包含 `coding`/`code` 视为 coding；包含 `reasoning`/`thinking`/`math` 视为 reasoning；包含 `tool use`/`function calling`/`agentic`/`agent` 视为工具调用。
+
+### 响应状态与错误分类规则
+
+| HTTP/异常 | `test_status` | `error_type` |
+|---|---|---|
+| 2xx | `available` | 空 |
+| 请求超时异常或 HTTP 408 | `timeout` | `timeout` |
+| 连接异常 | `network_error` | `network_error` |
+| 400 | `invalid_request` | `bad_request` |
+| 401 | `unauthorized` | `unauthorized` |
+| 403 | `forbidden_or_region_block` | `forbidden_or_region_block` |
+| 404 | `model_not_found_or_not_exposed` | `not_found` |
+| 429 | `rate_limited` | `rate_limited` |
+| 5xx | `server_error` | `server_error` |
+| 其他请求异常 | `request_error` 或 `unknown_error` | 对应异常类型 |
+
+重试规则：每个模型最多请求 `--retries + 1` 次；遇到 `available`、401、403、429、400、404 时立即停止该模型后续重试，避免重复打同一个受限接口。
+
+### 熔断与限流规则
+
+- 默认首次 429 立即停止整个任务。
+- 如果传入 `--continue-after-429`，则遇到 429 后暂停 `--rate-limit-sleep` 秒，并继续依赖连续 429 熔断阈值。
+- 连续 401 达到 2 次，停止任务。
+- 连续 429 达到 `--consecutive-429-breaker`，停止任务。
+- 连续 403 达到 `--consecutive-403-breaker`，停止任务。
+- 连续限制类错误达到 6 次，停止任务。限制类包括 403、429、401 或对应错误类型。
+- 连续网络错误达到 `--consecutive-network-breaker`，停止任务。
+- 已测试超过 10 个模型且失败率大于等于 90%，停止任务，视为疑似地区、IP、DNS、代理或 API Key 权限问题。
+
+### 输出规则
+
+- `probe_state.json` 保存完整状态、环境、配置、原始模型列表、Build 目录、选择摘要、详情页补全摘要和完整结果字段。
+- CSV/XLSX 是精简调用决策表，只保留模型 ID、可用性、延迟、上下文、最大输出 token、能力标签和错误原因等字段。
+- CSV/XLSX 默认把可用模型排在前面，再按 `latency_total_ms` 从低到高排序。
+- Excel 包含 `Summary`、`Available`、`All Models`、`Errors`、`Environment` 工作表。
+- `Available` 只包含 `test_status=available` 的模型，并按延迟从低到高排序，同延迟时上下文更大的模型更靠前。
+- 如果没有安装 `openpyxl`，只生成 JSON 和 CSV，不生成 Excel。
+
+### 自清理规则
+
+- `--cleanup-prompt auto` 和 `--cleanup-prompt always` 会在任务正常完成后询问“任务已完成。是否保留程序文件？”。
+- 正常完成后的提示中，只有输入 `y`/`yes` 或图形窗口选择“是”才保留程序。
+- 正常完成后的提示中，直接回车、输入 `n`/`no`、最终确认时 Ctrl+C、关闭图形窗口，都会删除程序本体，但不会删除结果文件。
+- 检测过程中按 Ctrl+C 中断时，会先保存当前状态，再询问“检测已被 Ctrl+C 中断。是否删除程序文件？”。此时默认不删除程序，只有输入 `y`/`yes` 或图形窗口选择“是”才删除程序。
+- 中断后的删除提示中，直接回车、输入 `n`/`no`、再次 Ctrl+C、关闭图形窗口，都会保留程序本体，方便稍后断点续跑。
+- 非交互式终端下：正常完成时默认删除程序本体、保留测试结果；Ctrl+C 中断时默认不删除程序文件。
+- `--cleanup-prompt never` 不询问并保留程序。
+- 手动运行时会删除 `nvidia_probe`、`scripts`、`pyproject.toml`、`requirements.txt`、`README.md`、`.venv`、`.git`、`build`、`dist`、`__pycache__` 和 `*.egg-info`，但会保护已有结果文件路径。
+- 一键脚本默认结果目录在安装目录外；如果需要删除整个安装目录，会通过 `NVIDIA_PROBE_CLEANUP_MARKER` 延迟到 Python 进程退出后由外层 shell 删除。
 
 ## 运行时实时进度
 
@@ -184,17 +318,13 @@ free 模型统计: 可确认 free=77，非免费/付费=0，费用未知=44
 完成 [15/20] z-ai/glm-5.2 -> status=available http=200 latency=1234ms error=；累计: 已处理 15/20，成功 12，失败 3，跳过 0
 ```
 
-## 免费模型策略
+## 常用运行方式
 
-默认开启“只测试可确认免费模型”：
+完整规则和参数见上面的“完整规则与参数”。下面只列常用命令。
 
-- 优先使用 NVIDIA Build Free Endpoint 页面识别免费模型，该页面会返回约 77 个 Free Endpoint 搜索结果。
-- 如果 API 模型元数据中有 `free`、`is_free`、`free_tier`、`no_cost`、`price: 0` 等明确免费信号，也会被视为免费。
-- 如果模型元数据中出现 `paid`、`billable`、`metered`、正价格等信号，会跳过。
-- 如果模型既不在 Build Free Endpoint 页面中，也没有明确免费信息，默认跳过，避免误测可能收费模型。
-- 报告会输出 `is_free`、`pricing_model`、`free_reason` 字段，方便审计为什么该模型被测试或跳过。
+默认开启“只测试可确认免费模型”。费用审计字段会保留在 `probe_state.json`，CSV/XLSX 只输出精简调用决策字段。
 
-不建议关闭该策略。如你确认当前 API 账户只暴露免费模型，可手动放宽：
+如你确认当前 API 账户只暴露免费模型，可手动允许费用未知模型：
 
 ```powershell
 nvidia-probe run --allow-unknown-cost
@@ -206,13 +336,13 @@ nvidia-probe run --allow-unknown-cost
 nvidia-probe run --no-build-catalog
 ```
 
-如果要完全关闭免费过滤，需要显式传入：
+如果要完全关闭免费过滤，需要显式传入；不建议使用：
 
 ```powershell
 nvidia-probe run --no-free-only
 ```
 
-## 快速运行
+### 快速运行
 
 先做 3 个模型的安全预检。默认已经使用 10 到 25 秒随机间隔、0 重试、首次 429 立即停止：
 
@@ -226,7 +356,7 @@ nvidia-probe run --top-free-models 3 --cleanup-prompt never
 python -m nvidia_probe run --top-free-models 3 --cleanup-prompt never
 ```
 
-## 完整慢速测试
+### 完整慢速测试
 
 默认完整测试使用 10 到 25 秒随机间隔，兼顾速度和安全：
 
@@ -240,13 +370,13 @@ nvidia-probe run --output-dir results --cleanup-prompt never
 nvidia-probe run --strict-safe --output-dir results --cleanup-prompt never
 ```
 
-## 只拉取模型列表，不真实调用
+### 只拉取模型列表，不真实调用
 
 ```powershell
 nvidia-probe run --dry-run --output-dir results
 ```
 
-## 断点续跑
+### 断点续跑
 
 默认会在输出目录保存 `probe_state.json`。中断后可继续：
 
@@ -254,7 +384,7 @@ nvidia-probe run --dry-run --output-dir results
 nvidia-probe run --resume --output-dir results
 ```
 
-## 多地区合并
+### 多地区合并
 
 将多个服务器生成的 `probe_state.json` 或 raw JSON 拷贝到一起，然后执行：
 
@@ -264,12 +394,13 @@ nvidia-probe merge --inputs jp_probe_state.json de_probe_state.json us_probe_sta
 
 ## 自清理行为
 
-任务结束后默认会询问是否保留程序文件，默认操作是删除程序本体、只保留测试结果。删除程序文件只会卸载工具本体，不会删除刚刚生成的检测结果：
+任务正常结束后默认会询问是否保留程序文件，默认操作是删除程序本体、只保留测试结果。删除程序文件只会卸载工具本体，不会删除刚刚生成的检测结果：
 
-- 只有输入 `y` / `yes`，或在图形窗口中选择“是”，才会保留程序文件。
-- 直接回车、输入 `n` / `no`、在最终确认提示时按 Ctrl+C、关闭图形窗口，都会删除 `nvidia_probe` 包、`scripts`、`.venv`、`.git`、`pyproject.toml`、`requirements.txt`、`README.md`、构建目录和安装元数据等程序文件；刚刚生成的检测结果文件会继续保留在结果目录。
+- 正常完成后的提示中，只有输入 `y` / `yes`，或在图形窗口中选择“是”，才会保留程序文件。
+- 正常完成后的提示中，直接回车、输入 `n` / `no`、在最终确认提示时按 Ctrl+C、关闭图形窗口，都会删除 `nvidia_probe` 包、`scripts`、`.venv`、`.git`、`pyproject.toml`、`requirements.txt`、`README.md`、构建目录和安装元数据等程序文件；刚刚生成的检测结果文件会继续保留在结果目录。
+- 如果检测过程中按 Ctrl+C 中断，工具会保存当前状态并询问“检测已被 Ctrl+C 中断。是否删除程序文件？”。这时默认操作是不删除程序；只有输入 `y` / `yes`，或在图形窗口中选择“是”，才会删除程序本体。
+- 中断后的删除提示中，直接回车、输入 `n` / `no`、再次按 Ctrl+C、关闭图形窗口，都会保留程序文件，方便稍后使用 `--resume` 断点续跑。
 - 一键运行脚本会把结果默认放在安装目录外的 `nvidia_probe_results`，因此选择卸载后会先写入卸载标记，再由外层脚本在 Python 进程退出后删除 `.nvidia_probe` 整个安装目录。
-- 如果检测过程中按 Ctrl+C 中断，工具会保存当前状态并跳过卸载提示，避免在异常退出时删除正在运行的程序目录并产生 traceback；只有任务正常完成后的最终确认提示里按 Ctrl+C 才会按默认操作删除程序本体。
 - 如果你手动运行且把 `--output-dir` 放在项目目录内部，项目根目录会因为包含结果文件而保留，但程序文件仍会被删除。
 - 如果想无提示保留程序文件，请使用 `--cleanup-prompt never`。
 
