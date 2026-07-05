@@ -12,6 +12,7 @@ DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
 DEFAULT_OUTPUT_DIR = "results"
 DEFAULT_INCLUDE_TYPES = ("chat", "embedding", "reranker")
 DEFAULT_SKIP_TYPES = ("image", "video", "audio")
+DEFAULT_BUILD_CATALOG_URL = "https://build.nvidia.com/models?filters=nimType%3Anim_type_preview"
 
 
 @dataclass(slots=True)
@@ -45,6 +46,8 @@ class ProbeConfig:
     strict_safe: bool = False
     free_only: bool = True
     allow_unknown_cost: bool = False
+    use_build_catalog: bool = True
+    build_catalog_url: str = DEFAULT_BUILD_CATALOG_URL
     request_user_agent: str = "nvidia-model-probe/0.1.0"
     raw_args: dict[str, object] = field(default_factory=dict)
 
@@ -122,6 +125,8 @@ def build_probe_config(args: argparse.Namespace) -> ProbeConfig:
         strict_safe=bool(args.strict_safe),
         free_only=not bool(args.no_free_only),
         allow_unknown_cost=bool(args.allow_unknown_cost),
+        use_build_catalog=not bool(args.no_build_catalog),
+        build_catalog_url=args.build_catalog_url,
         raw_args={key: value for key, value in vars(args).items() if key != "api_key"},
     )
     if config.delay_max < config.delay_min:

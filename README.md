@@ -37,7 +37,7 @@ bash -c "$(wget -qO- https://raw.githubusercontent.com/royswift2007/nvidia_probe
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/royswift2007/nvidia_probe/main/scripts/run_remote.sh)" nvidia-probe --top-free-models 3
 ```
 
-默认运行结束后会询问是否卸载程序。选择卸载时会删除一键运行下载的仓库、虚拟环境、脚本、包代码和安装元数据，只保留 `results` 目录中的测试结果。若想运行后不询问卸载，可追加参数：
+默认运行结束后会询问是否卸载程序。一键运行时，测试结果默认保存到当前目录的 `nvidia_probe_results`，程序安装目录默认是当前目录的 `.nvidia_probe`。选择卸载时会在 Python 进程退出后删除 `.nvidia_probe` 整个程序目录，只保留 `nvidia_probe_results` 中的测试结果。若想运行后不询问卸载，可追加参数：
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/royswift2007/nvidia_probe/main/scripts/run_remote.sh)" nvidia-probe --cleanup-prompt never
@@ -48,6 +48,14 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/royswift2007/nvidia_prob
 ```bash
 NVIDIA_PROBE_INSTALL_DIR=/tmp/nvidia_probe bash -c "$(curl -fsSL https://raw.githubusercontent.com/royswift2007/nvidia_probe/main/scripts/run_remote.sh)"
 ```
+
+如需指定结果目录：
+
+```bash
+NVIDIA_PROBE_RESULT_DIR=/root/nvidia_results bash -c "$(curl -fsSL https://raw.githubusercontent.com/royswift2007/nvidia_probe/main/scripts/run_remote.sh)"
+```
+
+如果上一次卸载后只剩 `.nvidia_probe/results` 这类旧结果目录，新脚本会先把旧结果迁移到 `nvidia_probe_results` 或带时间戳的备份目录，再重新克隆程序。
 
 如果缺少系统依赖，脚本会尽量自动处理。你的服务器如果出现 `ensurepip is not available`，说明缺少当前 Python 小版本对应的 venv 包，例如 Python 3.13 需要 `python3.13-venv`。Ubuntu/Debian 可手动执行：
 
@@ -126,6 +134,8 @@ export NVIDIA_API_KEY="你的 NVIDIA API Key"
 
 如果 NVIDIA 模型列表接口没有返回任何 30 天调用量字段，工具会把调用量标记为 `unknown`，并回退为检测全部可确认免费的候选模型。
 
+默认会额外抓取 NVIDIA Build 的 Free Endpoint 页面 `https://build.nvidia.com/models?filters=nimType%3Anim_type_preview`，该页面当前搜索总数约为 77 个 Free Endpoint 模型。工具会按页面分页抓取完整目录，把 `Free Endpoint` 标记和 `last_month_api_invocation_count` 回填到 API 模型列表，再只测试匹配到的免费模型。这样不会把 API `/models` 返回的 121 个费用未知模型全部当成免费模型。
+
 可以自定义测试数量：
 
 ```powershell
@@ -142,7 +152,8 @@ nvidia-probe run --top-free-models 50 --cleanup-prompt never
 
 运行时会持续在终端输出总体和详细检测状态，适合 SSH、tmux、screen 或服务器日志查看。关键输出包括：
 
-- 已拉取模型总数，以及可确认 free、非免费/付费、费用未知模型数量。
+- 已拉取模型总数，以及 Build Free Endpoint 目录总数、抓取数量、与 API 模型匹配数量。
+- 可确认 free、非免费/付费、费用未知模型数量。
 - 可确认 free 且类型匹配的候选数量、30 天 API 调用量覆盖数量、TopN 或回退策略说明。
 - 本次实际检测数量，例如“获取 77 个可确认 free 模型；类型匹配候选 77 个；本次检测 20 个模型”。
 - 即将检测的模型列表，包含模型 ID、名称、类型、调用量排名和 30 天调用量。
@@ -152,8 +163,9 @@ nvidia-probe run --top-free-models 50 --cleanup-prompt never
 示例输出：
 
 ```text
-已拉取模型总数: 92
-free 模型统计: 可确认 free=77，非免费/付费=8，费用未知=7
+Build Free Endpoint 目录: 页面总数=77；已抓取=77；与 API 模型匹配=77。
+已拉取模型总数: 121
+free 模型统计: 可确认 free=77，非免费/付费=0，费用未知=44
 检测计划: 获取 77 个可确认 free 模型；类型匹配候选 77 个；本次检测 20 个模型。
 正在检测 [1/20] meta/llama-3.1-8b-instruct | name=Llama 3.1 8B Instruct | type=chat | rank=1 | 30d_calls=2M
 完成 [1/20] meta/llama-3.1-8b-instruct -> status=available http=200 latency=1234ms error=；累计: 已处理 1/20，成功 1，失败 0，跳过 0
@@ -163,15 +175,22 @@ free 模型统计: 可确认 free=77，非免费/付费=8，费用未知=7
 
 默认开启“只测试可确认免费模型”：
 
-- 如果模型元数据中有 `free`、`is_free`、`free_tier`、`no_cost`、`price: 0` 等明确免费信号，才会真实调用测试。
+- 优先使用 NVIDIA Build Free Endpoint 页面识别免费模型，该页面会返回约 77 个 Free Endpoint 搜索结果。
+- 如果 API 模型元数据中有 `free`、`is_free`、`free_tier`、`no_cost`、`price: 0` 等明确免费信号，也会被视为免费。
 - 如果模型元数据中出现 `paid`、`billable`、`metered`、正价格等信号，会跳过。
-- 如果模型元数据没有费用信息，默认跳过，避免误测可能收费模型。
+- 如果模型既不在 Build Free Endpoint 页面中，也没有明确免费信息，默认跳过，避免误测可能收费模型。
 - 报告会输出 `is_free`、`pricing_model`、`free_reason` 字段，方便审计为什么该模型被测试或跳过。
 
 不建议关闭该策略。如你确认当前 API 账户只暴露免费模型，可手动放宽：
 
 ```powershell
 nvidia-probe run --allow-unknown-cost
+```
+
+如果不想抓取 NVIDIA Build 页面，只依赖 API 模型列表中的 free 元数据：
+
+```powershell
+nvidia-probe run --no-build-catalog
 ```
 
 如果要完全关闭免费过滤，需要显式传入：
@@ -236,6 +255,8 @@ nvidia-probe merge --inputs jp_probe_state.json de_probe_state.json us_probe_sta
 
 - 选择保留：不删除任何程序文件。
 - 选择不保留：删除 `nvidia_probe` 包、`scripts`、`.venv`、`.git`、`pyproject.toml`、`requirements.txt`、`README.md`、构建目录和安装元数据等程序文件，只保留结果文件。
+- 一键运行脚本会把结果默认放在安装目录外的 `nvidia_probe_results`，因此选择卸载后会在 Python 进程退出后继续删除 `.nvidia_probe` 整个安装目录。
+- 如果你手动运行且把 `--output-dir` 放在项目目录内部，项目根目录会因为包含结果文件而保留，但程序文件仍会被删除。
 
 如果远程环境没有图形界面，会退化为命令行确认。可通过参数控制：
 
@@ -261,12 +282,12 @@ nvidia-probe run --cleanup-prompt auto
 | 连续网络错误熔断 | 10 次 |
 | 默认测试类型 | chat、embedding、reranker |
 | 默认测试数量 | 按 30 天调用量取免费模型前 20 个 |
-| 免费模型过滤 | 开启，只测试可确认免费模型 |
+| 免费模型过滤 | 开启，优先使用 Build Free Endpoint 目录识别约 77 个免费模型 |
 | 未知费用模型 | 默认跳过 |
 
 ## 输出文件
 
-默认输出目录为 `results`，包含：
+手动运行时默认输出目录为 `results`；一键运行脚本默认输出到安装目录外的 `nvidia_probe_results`。结果目录包含：
 
 - `probe_state.json`：断点和完整原始结果。
 - `nvidia_models_report.csv`：表格结果。
@@ -276,12 +297,12 @@ nvidia-probe run --cleanup-prompt auto
 
 ## 注意事项
 
-- 默认只测试可确认免费的模型。
+- 默认只测试可确认免费的模型，优先通过 NVIDIA Build Free Endpoint 页面识别免费模型集合。
 - 每个模型会先测试是否可调用；只有调用成功后，才在报告中填充上下文长度、最大输出 token、能力支持等详细字段。
 - 如果模型不可调用，报告只保留基础元数据、筛选依据、错误状态和错误原因，不再填充详细能力字段。
-- 如果能获取 `API calls in the last 30 days`，默认按该指标排名测试前 20 个免费模型，可用 `--top-free-models` 调整数量。
+- 如果能获取 `API calls in the last 30 days` 或 Build 页面中的 `last_month_api_invocation_count`，默认按该指标排名测试前 20 个免费模型，可用 `--top-free-models` 调整数量。
 - 如果完全无法获取 30 天调用量数据，则回退为检测全部可确认免费的候选模型。
-- 如果 NVIDIA 模型列表接口不提供费用元数据，模型会被标记为 `unknown_cost` 并跳过。
+- 如果 NVIDIA 模型列表接口不提供费用元数据，工具会先用 Build Free Endpoint 页面补充 free 标记；仍无法确认免费的模型会被标记为 `unknown_cost` 并跳过。
 - 默认无重试，避免同一模型失败后短时间重复请求。
 - 默认首次 429 立即停止，避免继续请求带来 API 风险。
 - 如果连续出现 403，脚本会提前熔断，因为这通常代表地区、账号、权限或风控限制。

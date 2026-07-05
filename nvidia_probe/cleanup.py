@@ -101,24 +101,56 @@ def _contains_protected_path(target: Path, protected: set[Path]) -> bool:
     return False
 
 
+def _write_cleanup_marker(project_root: Path, protected: set[Path]) -> None:
+    marker = os.getenv("NVIDIA_PROBE_CLEANUP_MARKER")
+    if not marker:
+        return
+
+    resolved_root = project_root.resolve()
+    if _contains_protected_path(resolved_root, protected):
+        return
+
+    marker_path = Path(marker).expanduser().resolve()
+    try:
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        marker_path.write_text(str(resolved_root), encoding="utf-8")
+    except OSError as exc:
+        print(f"无法写入卸载标记文件 {marker_path}: {exc}")
+
+
+def _delete_target(target: Path) -> None:
+    if target.is_dir():
+        shutil.rmtree(target)
+    else:
+        target.unlink()
+
+
 def cleanup_program_files(project_root: Path, result_paths: list[Path]) -> tuple[list[Path], list[tuple[Path, str]]]:
     deleted: list[Path] = []
     failures: list[tuple[Path, str]] = []
     protected = {path.resolve() for path in result_paths if path.exists()}
+    _write_cleanup_marker(project_root, protected)
+
     for target in _iter_cleanup_targets(project_root):
         if _contains_protected_path(target, protected):
             continue
         if not target.exists():
             continue
         try:
-            if target.is_dir():
-                shutil.rmtree(target)
-            else:
-                target.unlink()
+            _delete_target(target)
         except OSError as exc:
             failures.append((target, str(exc)))
             continue
         deleted.append(target)
+
+    resolved_root = project_root.resolve()
+    if resolved_root.exists() and not _contains_protected_path(resolved_root, protected):
+        try:
+            _delete_target(resolved_root)
+        except OSError as exc:
+            failures.append((resolved_root, str(exc)))
+        else:
+            deleted.append(resolved_root)
     return deleted, failures
 
 
@@ -134,6 +166,11 @@ def maybe_cleanup_program(cleanup_prompt: str, project_root: Path, result_paths:
             print(f"- {path}")
     else:
         print("没有发现可删除的程序文件。")
+    existing_results = [path for path in result_paths if path.exists()]
+    if existing_results:
+        print("已保留测试结果文件：")
+        for path in existing_results:
+            print(f"- {path}")
     if failures:
         print("以下程序文件未能删除，可稍后手动删除：")
         for path, error in failures:

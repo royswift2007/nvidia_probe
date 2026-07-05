@@ -3,7 +3,10 @@ set -Eeuo pipefail
 
 REPO_URL="${NVIDIA_PROBE_REPO_URL:-https://github.com/royswift2007/nvidia_probe.git}"
 BRANCH="${NVIDIA_PROBE_BRANCH:-main}"
-INSTALL_DIR="${NVIDIA_PROBE_INSTALL_DIR:-${PWD}/.nvidia_probe}"
+ORIGINAL_DIR="${PWD}"
+INSTALL_DIR="${NVIDIA_PROBE_INSTALL_DIR:-${ORIGINAL_DIR}/.nvidia_probe}"
+RESULT_DIR="${NVIDIA_PROBE_RESULT_DIR:-${ORIGINAL_DIR}/nvidia_probe_results}"
+CLEANUP_MARKER="${NVIDIA_PROBE_CLEANUP_MARKER:-${ORIGINAL_DIR}/.nvidia_probe_cleanup_marker}"
 PYTHON_BIN="${PYTHON:-python3}"
 
 log() {
@@ -83,6 +86,29 @@ ensure_venv_ready() {
   exit 1
 }
 
+cleanup_dir_safely() {
+  local target="$1"
+  if [ -z "$target" ] || [ "$target" = "/" ] || [ "$target" = "$ORIGINAL_DIR" ]; then
+    log "拒绝删除不安全目录: $target"
+    return 1
+  fi
+  rm -rf "$target"
+}
+
+preserve_old_results_if_needed() {
+  if [ ! -d "$INSTALL_DIR/results" ]; then
+    return 0
+  fi
+
+  local destination="$RESULT_DIR"
+  if [ -e "$destination" ]; then
+    destination="${RESULT_DIR}_previous_$(date -u +%Y%m%d_%H%M%S)"
+  fi
+  mkdir -p "$(dirname "$destination")"
+  mv "$INSTALL_DIR/results" "$destination"
+  log "已保留旧结果目录: $destination"
+}
+
 ensure_command git
 ensure_command "$PYTHON_BIN"
 ensure_venv_ready
@@ -96,9 +122,10 @@ if [ -d "$INSTALL_DIR/.git" ]; then
   git -C "$INSTALL_DIR" reset --hard "origin/$BRANCH"
 else
   if [ -n "$(find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 2>/dev/null | head -n 1)" ]; then
-    log "安装目录非空且不是 git 仓库: $INSTALL_DIR"
-    log "请设置 NVIDIA_PROBE_INSTALL_DIR 指向空目录，或删除该目录后重试。"
-    exit 1
+    log "发现旧的非 git 安装目录: $INSTALL_DIR"
+    preserve_old_results_if_needed
+    cleanup_dir_safely "$INSTALL_DIR"
+    mkdir -p "$INSTALL_DIR"
   fi
   log "克隆项目到: $INSTALL_DIR"
   git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
@@ -119,6 +146,31 @@ python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r requirements.txt
 python -m pip install -e .
 
+mkdir -p "$RESULT_DIR"
+rm -f "$CLEANUP_MARKER"
+export NVIDIA_PROBE_CLEANUP_MARKER="$CLEANUP_MARKER"
+
 log "启动检测。如果未设置 NVIDIA_API_KEY，将提示隐藏输入 API Key。"
+log "结果目录: $RESULT_DIR"
 log "默认参数: --cleanup-prompt auto；运行结束后会询问是否卸载程序，只保留测试结果。"
-python -m nvidia_probe run --cleanup-prompt auto "$@"
+set +e
+python -m nvidia_probe run --cleanup-prompt auto --output-dir "$RESULT_DIR" "$@"
+status=$?
+set -e
+
+cd "$ORIGINAL_DIR"
+if [ -f "$CLEANUP_MARKER" ]; then
+  cleanup_target="$(cat "$CLEANUP_MARKER" 2>/dev/null || true)"
+  rm -f "$CLEANUP_MARKER"
+  if [ -n "$cleanup_target" ] && [ -d "$cleanup_target" ]; then
+    cleanup_dir_safely "$cleanup_target" || true
+    if [ -d "$cleanup_target" ]; then
+      log "程序目录仍未完全删除，可手动删除: $cleanup_target"
+    else
+      log "已卸载程序目录: $cleanup_target"
+    fi
+  fi
+fi
+
+log "测试结果保留在: $RESULT_DIR"
+exit "$status"

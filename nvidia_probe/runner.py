@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .build_catalog import apply_build_catalog_to_models, fetch_free_endpoint_catalog
 from .client import NvidiaApiClient
 from .cleanup import maybe_cleanup_program
 from .config import ProbeConfig
@@ -128,6 +129,28 @@ def run_probe(config: ProbeConfig, project_root: Path) -> int:
         state["models_payload_raw"] = models_response.data
         models = normalize_models(models_response.data)
         total_model_count = len(models)
+        catalog_apply = None
+        if config.use_build_catalog and config.free_only:
+            _print_progress("正在拉取 NVIDIA Build Free Endpoint 模型目录...")
+            catalog_result = fetch_free_endpoint_catalog(
+                url=config.build_catalog_url,
+                timeout=config.timeout,
+                user_agent=config.request_user_agent,
+            )
+            state["build_catalog"] = catalog_result.to_state()
+            catalog_apply = apply_build_catalog_to_models(models, catalog_result)
+            _print_progress(
+                f"Build Free Endpoint 目录: 页面总数={catalog_apply.catalog_total_count}；"
+                f"已抓取={catalog_apply.catalog_models_count}；"
+                f"与 API 模型匹配={catalog_apply.matched_count}。"
+            )
+            if catalog_apply.unmatched_model_ids:
+                preview = ", ".join(catalog_apply.unmatched_model_ids[:8])
+                suffix = "..." if len(catalog_apply.unmatched_model_ids) > 8 else ""
+                _print_progress(f"Build 目录中未匹配 API 模型: {preview}{suffix}")
+            if catalog_result.errors:
+                _print_progress("Build Free Endpoint 目录抓取存在错误: " + "; ".join(catalog_result.errors[:3]))
+
         free_model_count = sum(1 for model in models if model.is_free is True)
         paid_model_count = sum(1 for model in models if model.is_free is False)
         unknown_cost_count = sum(1 for model in models if model.is_free is None)
@@ -185,8 +208,14 @@ def run_probe(config: ProbeConfig, project_root: Path) -> int:
             if len(models) < planned_before_limit_count:
                 _print_progress(f"--limit 已生效: 从 {planned_before_limit_count} 个候选缩减到 {len(models)} 个。")
 
+        if free_model_count:
+            plan_free_label = f"{free_model_count} 个可确认 free 模型"
+        elif config.use_build_catalog and config.free_only:
+            plan_free_label = "0 个可确认 free 模型；Build Free Endpoint 目录未匹配到 API 模型"
+        else:
+            plan_free_label = f"{free_model_count} 个可确认 free 模型"
         _print_progress(
-            f"检测计划: 获取 {free_model_count} 个可确认 free 模型；"
+            f"检测计划: 获取 {plan_free_label}；"
             f"类型匹配候选 {selectable_count} 个；本次检测 {len(models)} 个模型。"
         )
         if known_usage > 0:

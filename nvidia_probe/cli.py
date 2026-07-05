@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .config import DEFAULT_BASE_URL, DEFAULT_OUTPUT_DIR, build_probe_config
+from .config import DEFAULT_BASE_URL, DEFAULT_BUILD_CATALOG_URL, DEFAULT_OUTPUT_DIR, build_probe_config
 from .merge import merge_states, write_merge_csv, write_merge_excel
 from .runner import run_probe
 
@@ -53,6 +53,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-unknown-cost",
         action="store_true",
         help="允许测试无法从元数据确认免费/收费的模型。不建议使用。",
+    )
+    run_parser.add_argument(
+        "--no-build-catalog",
+        action="store_true",
+        help="不抓取 NVIDIA Build Free Endpoint 页面辅助识别免费模型。不建议使用。",
+    )
+    run_parser.add_argument(
+        "--build-catalog-url",
+        default=DEFAULT_BUILD_CATALOG_URL,
+        help="NVIDIA Build Free Endpoint 模型页面 URL。",
     )
     run_parser.add_argument(
         "--cleanup-prompt",
