@@ -1,0 +1,50 @@
+usage: python.exe -m compileall [-h] [-l] [-r RECURSION] [-f] [-q] [-b]
+                                [-d DESTDIR] [-s STRIPDIR] [-p PREPENDDIR]
+                                [-x REGEXP] [-i FILE] [-j WORKERS]
+                                [--invalidation-mode {checked-hash,timestamp,unchecked-hash}]
+                                [-o OPT_LEVELS] [-e DIR] [--hardlink-dupes]
+                                [FILE|DIR ...]
+
+Utilities to support installing Python libraries.
+
+positional arguments:
+  FILE|DIR              zero or more file and directory names to compile; if
+                        no arguments given, defaults to the equivalent of -l
+                        sys.path
+
+options:
+  -h, --help            show this help message and exit
+  -l                    don't recurse into subdirectories
+  -r RECURSION          control the maximum recursion level. if `-l` and `-r`
+                        options are specified, then `-r` takes precedence.
+  -f                    force rebuild even if timestamps are up to date
+  -q                    output only error messages; -qq will suppress the
+                        error messages as well.
+  -b                    use legacy (pre-PEP3147) compiled file locations
+  -d DESTDIR            directory to prepend to file paths for use in compile-
+                        time tracebacks and in runtime tracebacks in cases
+                        where the source file is unavailable
+  -s STRIPDIR           part of path to left-strip from path to source file -
+                        for example buildroot. `-d` and `-s` options cannot be
+                        specified together.
+  -p PREPENDDIR         path to add as prefix to path to source file - for
+                        example / to make it absolute when some part is
+                        removed by `-s` option. `-d` and `-p` options cannot
+                        be specified together.
+  -x REGEXP             skip files matching the regular expression; the regexp
+                        is searched for in the full path of each file
+                        considered for compilation
+  -i FILE               add all the files and directories listed in FILE to
+                        the list considered for compilation; if "-", names are
+                        read from stdin
+  -j, --workers WORKERS
+                        Run compileall concurrently
+  --invalidation-mode {checked-hash,timestamp,unchecked-hash}
+                        set .pyc invalidation mode; defaults to "checked-hash"
+                        if the SOURCE_DATE_EPOCH environment variable is set,
+                        and "timestamp" otherwise.
+  -o OPT_LEVELS         Optimization levels to run compilation with. Default
+                        is -1 which uses the optimization level of the Python
+                        interpreter itself (see -O).
+  -e DIR                Ignore symlinks pointing outsite of the DIR
+  --hardlink-dupes      Hardlink duplicated pyc files
