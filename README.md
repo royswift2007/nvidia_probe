@@ -302,17 +302,41 @@ nvidia-probe run --cleanup-prompt auto
 
 手动运行时默认输出目录为 `results`；一键运行脚本默认输出到安装目录外的 `nvidia_probe_results`。结果目录包含：
 
-- `probe_state.json`：断点和完整原始结果。
-- `nvidia_models_report.csv`：表格结果。
+- `probe_state.json`：断点、运行配置、环境信息、完整原始结果。
+- `nvidia_models_report.csv`：调用决策优先的表格结果，默认把可用模型排在前面，再按连接延迟从低到高排序。
 - `nvidia_models_report.xlsx`：Excel 报告，如果安装 openpyxl。
 - `merge_report.csv`：多地区合并结果。
 - `merge_report.xlsx`：多地区合并 Excel，如果安装 openpyxl。
 
+Excel 报告包含多个工作表：
+
+- `Summary`：汇总可用数量、失败数量、最快/最慢/平均延迟，以及可用模型中支持图像输入、coding、reasoning、tool/function calling 的数量。
+- `Available`：推荐优先查看的工作表，只包含可调用成功的模型，并按 `latency_total_ms` 从低到高排序；用于快速判断当前服务器环境下哪些模型速度更快、最适合调用。
+- `All Models`：全部测试结果，仍然优先显示可用模型，再显示失败或跳过模型。
+- `Errors`：只列出调用失败、限流、地区阻断、无权限、网络错误等非可用结果。
+- `Environment`：服务器公网 IP、国家、系统、Python 版本等环境信息，方便多地区对比。
+
+报告列已经按调用决策优先排序。最重要的字段包括：
+
+- `test_status`：模型是否可用，`available` 表示当前服务器、当前 API Key、当前网络环境下调用成功。
+- `latency_total_ms`：真实探测请求总延迟，越低代表当前环境连接越快。
+- `context_length`：模型上下文长度。
+- `max_output_tokens`：模型最大输出 token 数。
+- `supports_image_input` / `supports_vision`：是否支持图像输入、视觉或多模态能力。
+- `supports_coding`：是否偏向代码生成或 coding 场景。
+- `supports_reasoning`：是否带 reasoning、thinking、math 等推理标签。
+- `supports_function_calling` / `supports_tools`：是否带 tool use、function calling、agentic 等工具调用标签。
+- `supports_json_mode` / `supports_streaming` / `supports_embedding`：JSON、流式、embedding 等调用能力。
+- `capability_tags` / `usecase_tags` / `deployment_providers`：从 NVIDIA Build 元数据提取的能力、用途和部署提供商标签。
+- `error_type` / `error_message` / `http_status`：不可用模型的失败原因。
+
+`selection_rank`、`selection_bucket`、`usage_rank`、`api_calls_30d`、`projected_30d_calls` 等筛选和热度字段仍会保留，但已经放在后面，主要用于审计为什么该模型被选入测试集合。
+
 ## 注意事项
 
 - 默认只测试可确认免费的模型，优先通过 NVIDIA Build Free Endpoint 页面识别免费模型集合。
-- 每个模型会先测试是否可调用；只有调用成功后，才在报告中填充上下文长度、最大输出 token、能力支持等详细字段。
-- 如果模型不可调用，报告只保留基础元数据、筛选依据、错误状态和错误原因，不再填充详细能力字段。
+- 每个模型都会先做一次低成本真实调用，`test_status=available` 才代表当前服务器环境下真实可调用成功。
+- 上下文长度、最大输出 token、图像、coding、reasoning、tool/function calling 等能力字段主要来自 NVIDIA API 模型元数据和 Build Free Endpoint 页面标签；即使某个模型本次不可调用，报告也会尽量保留这些元数据，便于判断是网络/地区/API 权限问题还是模型能力不符合需求。
 - 如果能获取 `API calls in the last 30 days` 或 Build 页面中的 `last_month_api_invocation_count`，默认使用混合 TopN 选择前 20 个免费模型，可用 `--top-free-models` 调整总数量。
 - 如果完全无法获取 30 天调用量数据，则回退为检测全部可确认免费的候选模型。
 - 如果 NVIDIA 模型列表接口不提供费用元数据，工具会先用 Build Free Endpoint 页面补充 free 标记；仍无法确认免费的模型会被标记为 `unknown_cost` 并跳过。

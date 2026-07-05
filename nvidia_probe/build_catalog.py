@@ -9,7 +9,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import requests
 
-from .models import NormalizedModel, enrich_model_heat_metrics, format_human_count, infer_created_at, parse_human_count
+from .models import NormalizedModel, enrich_model_heat_metrics, format_human_count, infer_capability_profile, infer_created_at, parse_human_count
 
 DEFAULT_BUILD_CATALOG_URL = "https://build.nvidia.com/models?filters=nimType%3Anim_type_preview"
 
@@ -366,6 +366,18 @@ def apply_build_catalog_to_models(
             target.created_at_utc = catalog_model.created_at_utc
             target.created_at_source = catalog_model.created_at_source
             enrich_model_heat_metrics(target)
+        capability_profile = infer_capability_profile(catalog_model.raw, target.model_type)
+        target.supports_image_input = capability_profile["supports_image_input"]
+        target.supports_coding = capability_profile["supports_coding"]
+        target.supports_reasoning = capability_profile["supports_reasoning"]
+        target.supports_function_calling = capability_profile["supports_function_calling"]
+        if target.supports_tools == "unknown":
+            target.supports_tools = capability_profile["supports_tools"]
+        if target.supports_vision in ("unknown", False):
+            target.supports_vision = capability_profile["supports_vision"]
+        target.capability_tags = capability_profile["capability_tags"]
+        target.usecase_tags = capability_profile["usecase_tags"]
+        target.deployment_providers = capability_profile["deployment_providers"]
         target.raw.setdefault("_build_catalog", catalog_model.to_state())
 
     return BuildCatalogApplyResult(

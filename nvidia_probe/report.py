@@ -8,45 +8,52 @@ from typing import Any
 RESULT_COLUMNS = [
     "model_id",
     "display_name",
+    "test_status",
+    "latency_total_ms",
+    "http_status",
+    "model_type",
+    "context_length",
+    "max_output_tokens",
+    "supports_image_input",
+    "supports_vision",
+    "supports_coding",
+    "supports_reasoning",
+    "supports_function_calling",
+    "supports_tools",
+    "supports_json_mode",
+    "supports_streaming",
+    "supports_embedding",
+    "vector_dimension",
+    "capability_tags",
+    "usecase_tags",
+    "deployment_providers",
     "provider",
     "owned_by",
-    "model_type",
     "endpoint_type",
+    "response_preview",
+    "error_type",
+    "error_message",
+    "retry_count",
+    "tested_at_utc",
+    "skip_reason",
     "is_free",
     "pricing_model",
     "free_reason",
-    "api_calls_30d",
-    "api_calls_30d_display",
-    "api_calls_30d_source",
-    "usage_rank",
-    "trending_rank",
-    "newest_rank",
     "selection_rank",
     "selection_bucket",
     "selection_reason",
+    "usage_rank",
+    "trending_rank",
+    "newest_rank",
+    "api_calls_30d",
+    "api_calls_30d_display",
+    "api_calls_30d_source",
     "created_at_utc",
     "created_at_source",
     "model_age_days",
     "api_calls_per_day",
     "projected_30d_calls",
     "projected_30d_calls_display",
-    "context_length",
-    "max_output_tokens",
-    "supports_streaming",
-    "supports_tools",
-    "supports_json_mode",
-    "supports_vision",
-    "supports_embedding",
-    "test_status",
-    "http_status",
-    "latency_total_ms",
-    "retry_count",
-    "error_type",
-    "error_message",
-    "response_preview",
-    "tested_at_utc",
-    "skip_reason",
-    "vector_dimension",
 ]
 
 ENV_COLUMNS = [
@@ -81,6 +88,39 @@ def _stringify(value: Any) -> str:
     return str(value)
 
 
+def _safe_number(value: Any, default: float = 999999999.0) -> float:
+    if value in (None, "", "unknown", "None"):
+        return default
+    try:
+        return float(str(value).replace(",", ""))
+    except ValueError:
+        return default
+
+
+def _available_sort_key(item: dict[str, Any]) -> tuple[float, float, str]:
+    return (
+        _safe_number(item.get("latency_total_ms")),
+        -_safe_number(item.get("context_length"), default=0.0),
+        str(item.get("model_id", "")),
+    )
+
+
+def _all_results_sort_key(item: dict[str, Any]) -> tuple[int, float, str]:
+    return (
+        0 if item.get("test_status") == "available" else 1,
+        _safe_number(item.get("latency_total_ms")),
+        str(item.get("model_id", "")),
+    )
+
+
+def _sorted_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(results, key=_all_results_sort_key)
+
+
+def _available_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted([item for item in results if item.get("test_status") == "available"], key=_available_sort_key)
+
+
 def calculate_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
     total = len(results)
     available = sum(1 for item in results if item.get("test_status") == "available")
@@ -103,6 +143,10 @@ def calculate_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
         "not_free": sum(1 for item in results if item.get("is_free") is False or str(item.get("is_free", "")).lower() == "false"),
         "models_with_30d_usage": sum(1 for item in results if item.get("api_calls_30d") not in (None, "", "None")),
         "models_with_created_at": sum(1 for item in results if item.get("created_at_utc")),
+        "available_with_image_input": sum(1 for item in results if item.get("test_status") == "available" and str(item.get("supports_image_input", "")).lower() == "true"),
+        "available_with_coding": sum(1 for item in results if item.get("test_status") == "available" and str(item.get("supports_coding", "")).lower() == "true"),
+        "available_with_reasoning": sum(1 for item in results if item.get("test_status") == "available" and str(item.get("supports_reasoning", "")).lower() == "true"),
+        "available_with_tool_or_function_calling": sum(1 for item in results if item.get("test_status") == "available" and str(item.get("supports_function_calling", "")).lower() == "true"),
         "hybrid_stable_popular": sum(1 for item in results if item.get("selection_bucket") == "stable_popular"),
         "hybrid_trending_new": sum(1 for item in results if item.get("selection_bucket") == "trending_new"),
         "hybrid_newest_free": sum(1 for item in results if item.get("selection_bucket") == "newest_free"),
@@ -122,7 +166,7 @@ def write_csv(path: Path, results: list[dict[str, Any]]) -> None:
     with path.open("w", newline="", encoding="utf-8-sig") as file:
         writer = csv.DictWriter(file, fieldnames=RESULT_COLUMNS, extrasaction="ignore")
         writer.writeheader()
-        for item in results:
+        for item in _sorted_results(results):
             writer.writerow({column: _stringify(item.get(column, "")) for column in RESULT_COLUMNS})
 
 
@@ -142,7 +186,12 @@ def write_excel(path: Path, results: list[dict[str, Any]], summary: dict[str, An
     for key, value in summary.items():
         summary_ws.append([key, value])
 
-    model_ws = workbook.create_sheet("Models")
+    available_ws = workbook.create_sheet("Available")
+    available_ws.append(RESULT_COLUMNS)
+    for item in _available_results(results):
+        available_ws.append([_stringify(item.get(column, "")) for column in RESULT_COLUMNS])
+
+    model_ws = workbook.create_sheet("All Models")
     model_ws.append(RESULT_COLUMNS)
     fills = {
         "available": PatternFill("solid", fgColor="C6EFCE"),
@@ -153,7 +202,7 @@ def write_excel(path: Path, results: list[dict[str, Any]], summary: dict[str, An
         "unauthorized": PatternFill("solid", fgColor="FFC7CE"),
         "forbidden_or_region_block": PatternFill("solid", fgColor="FFC7CE"),
     }
-    for item in results:
+    for item in _sorted_results(results):
         row = [_stringify(item.get(column, "")) for column in RESULT_COLUMNS]
         model_ws.append(row)
         fill = fills.get(str(item.get("test_status", "")))
@@ -193,28 +242,39 @@ def print_table(results: list[dict[str, Any]], limit: int = 30) -> None:
         from rich.console import Console
         from rich.table import Table
     except ImportError:
-        print("model_id,status,latency_ms,http_status,error")
-        for item in results[:limit]:
+        print("model_id,status,latency_ms,context,max_output,vision,coding,reasoning,tools,error")
+        for item in _sorted_results(results)[:limit]:
             print(
                 f"{item.get('model_id','')},{item.get('test_status','')},{item.get('latency_total_ms','')},"
-                f"{item.get('http_status','')},{str(item.get('error_type',''))[:80]}"
+                f"{item.get('context_length','')},{item.get('max_output_tokens','')},"
+                f"{item.get('supports_image_input','')},{item.get('supports_coding','')},"
+                f"{item.get('supports_reasoning','')},{item.get('supports_function_calling','')},"
+                f"{str(item.get('error_type',''))[:80]}"
             )
         return
 
     table = Table(title="NVIDIA Model Probe Results")
     table.add_column("model_id", overflow="fold")
-    table.add_column("type")
     table.add_column("status")
     table.add_column("latency_ms", justify="right")
-    table.add_column("http", justify="right")
+    table.add_column("ctx", justify="right")
+    table.add_column("max_out", justify="right")
+    table.add_column("vision")
+    table.add_column("coding")
+    table.add_column("reasoning")
+    table.add_column("tools")
     table.add_column("error", overflow="fold")
-    for item in results[:limit]:
+    for item in _sorted_results(results)[:limit]:
         table.add_row(
             str(item.get("model_id", "")),
-            str(item.get("model_type", "")),
             str(item.get("test_status", "")),
             str(item.get("latency_total_ms", "")),
-            str(item.get("http_status", "")),
+            str(item.get("context_length", "")),
+            str(item.get("max_output_tokens", "")),
+            str(item.get("supports_image_input", "")),
+            str(item.get("supports_coding", "")),
+            str(item.get("supports_reasoning", "")),
+            str(item.get("supports_function_calling", "")),
             str(item.get("error_type", ""))[:80],
         )
     Console().print(table)

@@ -20,7 +20,14 @@ class NormalizedModel:
     supports_tools: Any = "unknown"
     supports_json_mode: Any = "unknown"
     supports_vision: Any = "unknown"
+    supports_image_input: Any = "unknown"
+    supports_coding: Any = "unknown"
+    supports_reasoning: Any = "unknown"
+    supports_function_calling: Any = "unknown"
     supports_embedding: Any = "unknown"
+    capability_tags: str = ""
+    usecase_tags: str = ""
+    deployment_providers: str = ""
     is_free: bool | None = None
     pricing_model: str = "unknown"
     free_reason: str = "unknown"
@@ -154,6 +161,105 @@ def parse_datetime_utc(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _as_text_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        values: list[str] = []
+        for nested in value.values():
+            values.extend(_as_text_list(nested))
+        return values
+    if isinstance(value, (list, tuple, set)):
+        values = []
+        for item in value:
+            values.extend(_as_text_list(item))
+        return values
+    if isinstance(value, (int, float, bool)):
+        return [str(value)]
+    return []
+
+
+def _csv_unique(values: list[str]) -> str:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+    return ", ".join(result)
+
+
+def _truthy_from_tokens(tokens: list[str], keywords: tuple[str, ...]) -> bool | str:
+    normalized = " | ".join(tokens).lower().replace("_", "-")
+    if any(keyword in normalized for keyword in keywords):
+        return True
+    return "unknown"
+
+
+def _label_values_from_raw(model: dict[str, Any], label_key: str) -> list[str]:
+    values: list[str] = []
+    target = label_key.lower()
+    for path, value in _iter_key_values(model):
+        key = path.split(".")[-1].split("[")[0].lower()
+        if key == target:
+            values.extend(_as_text_list(value))
+        if key == "labels" and isinstance(value, list):
+            for label in value:
+                if not isinstance(label, dict):
+                    continue
+                if str(label.get("key") or "").lower() == target:
+                    values.extend(_as_text_list(label.get("values")))
+                    values.extend(_as_text_list(label.get("unresolvedValues")))
+    return values
+
+
+def infer_capability_profile(model: dict[str, Any], model_type: str) -> dict[str, Any]:
+    general_tags = _label_values_from_raw(model, "general")
+    usecase_tags = _label_values_from_raw(model, "usecase")
+    cloud_partners = _label_values_from_raw(model, "cloudPartnerType")
+    playground_types = _label_values_from_raw(model, "playgroundType")
+    text_tokens = general_tags + usecase_tags + playground_types + [str(model.get("id") or model.get("model") or model.get("name") or "")]
+    all_text = " | ".join(text_tokens).lower().replace("_", "-")
+
+    supports_image_input: Any = _truthy_from_tokens(
+        text_tokens,
+        (
+            "image-to-text",
+            "image text",
+            "image-text",
+            "vision",
+            "vlm",
+            "visual",
+            "ocr",
+            "multimodal",
+            "vision-language",
+        ),
+    )
+    supports_vision: Any = supports_image_input if supports_image_input is True else (model_type == "vision" or "vision" in all_text or "vlm" in all_text)
+    supports_coding: Any = _truthy_from_tokens(text_tokens, ("coding", "code generation", "code-generation", "code"))
+    supports_reasoning: Any = _truthy_from_tokens(text_tokens, ("reasoning", "advanced reasoning", "thinking", "math"))
+    supports_function_calling: Any = _truthy_from_tokens(text_tokens, ("tool use", "tool-use", "tool calling", "function calling", "agentic", "agent"))
+
+    return {
+        "supports_image_input": supports_image_input,
+        "supports_vision": supports_vision,
+        "supports_coding": supports_coding,
+        "supports_reasoning": supports_reasoning,
+        "supports_function_calling": supports_function_calling,
+        "supports_tools": supports_function_calling,
+        "capability_tags": _csv_unique(general_tags),
+        "usecase_tags": _csv_unique(usecase_tags),
+        "deployment_providers": _csv_unique(cloud_partners),
+    }
 
 
 def infer_free_status(model: dict[str, Any]) -> tuple[bool | None, str, str]:
@@ -408,6 +514,9 @@ def normalize_model(model: dict[str, Any]) -> NormalizedModel:
     is_free, pricing_model, free_reason = infer_free_status(model)
     api_calls_30d, api_calls_30d_display, api_calls_30d_source = infer_api_calls_30d(model)
     created_at_utc, created_at_source = infer_created_at(model)
+    capability_profile = infer_capability_profile(model, model_type)
+    explicit_supports_tools = _deep_first_present(model, ("supports_tools", "tools", "tool_calling"), None)
+    explicit_supports_vision = _deep_first_present(model, ("supports_vision", "vision"), None)
     normalized = NormalizedModel(
         model_id=model_id,
         display_name=str(_deep_first_present(model, ("display_name", "displayName", "name", "id"), model_id)),
@@ -434,10 +543,17 @@ def normalize_model(model: dict[str, Any]) -> NormalizedModel:
             "unknown",
         ),
         supports_streaming=_deep_first_present(model, ("supports_streaming", "streaming"), "unknown"),
-        supports_tools=_deep_first_present(model, ("supports_tools", "tools", "tool_calling"), "unknown"),
+        supports_tools=explicit_supports_tools if explicit_supports_tools is not None else capability_profile["supports_tools"],
         supports_json_mode=_deep_first_present(model, ("supports_json_mode", "json_mode"), "unknown"),
-        supports_vision=_deep_first_present(model, ("supports_vision", "vision"), model_type == "vision"),
+        supports_vision=explicit_supports_vision if explicit_supports_vision is not None else capability_profile["supports_vision"],
+        supports_image_input=capability_profile["supports_image_input"],
+        supports_coding=capability_profile["supports_coding"],
+        supports_reasoning=capability_profile["supports_reasoning"],
+        supports_function_calling=capability_profile["supports_function_calling"],
         supports_embedding=_deep_first_present(model, ("supports_embedding", "embedding"), model_type == "embedding"),
+        capability_tags=capability_profile["capability_tags"],
+        usecase_tags=capability_profile["usecase_tags"],
+        deployment_providers=capability_profile["deployment_providers"],
         is_free=is_free,
         pricing_model=pricing_model,
         free_reason=free_reason,
