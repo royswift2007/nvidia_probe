@@ -17,7 +17,7 @@
 
 ## 远程服务器一条命令运行
 
-在 Linux 远程服务器上，如果已经安装 `curl`、`git`、`python3` 和 `python3-venv`，可以直接执行一条命令完成拉取、安装、运行。命令会自动创建虚拟环境；如果没有设置 `NVIDIA_API_KEY`，会提示隐藏输入 API Key，然后开始测试。
+在 Linux 远程服务器上，可以直接执行一条命令完成拉取、安装、运行。命令会自动检查 `git`、`python3` 和 Python `venv/ensurepip`；在 Debian/Ubuntu 且有 root/sudo 权限时，如果缺少 `python3.13-venv`、`python3-venv` 这类依赖，会自动尝试安装。随后脚本会创建虚拟环境；如果没有设置 `NVIDIA_API_KEY`，会提示隐藏输入 API Key，然后开始测试。
 
 推荐使用下面这种 `bash -c "$(curl ...)"` 形式，而不是 `curl ... | bash`，这样后续 Python 进程仍然可以从交互式终端安全读取 API Key：
 
@@ -49,11 +49,13 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/royswift2007/nvidia_prob
 NVIDIA_PROBE_INSTALL_DIR=/tmp/nvidia_probe bash -c "$(curl -fsSL https://raw.githubusercontent.com/royswift2007/nvidia_probe/main/scripts/run_remote.sh)"
 ```
 
-如果缺少系统依赖，Ubuntu/Debian 可先执行：
+如果缺少系统依赖，脚本会尽量自动处理。你的服务器如果出现 `ensurepip is not available`，说明缺少当前 Python 小版本对应的 venv 包，例如 Python 3.13 需要 `python3.13-venv`。Ubuntu/Debian 可手动执行：
 
 ```bash
-sudo apt update && sudo apt install -y curl git python3 python3-venv
+sudo apt update && sudo apt install -y curl git python3 python3-venv python3.13-venv
 ```
+
+如果不是 Python 3.13，请把 `python3.13-venv` 替换为当前版本，例如 `python3.12-venv`。
 
 ## 安装
 
@@ -74,6 +76,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 pip install -e .
 ```
+
+如果创建虚拟环境时报 `ensurepip is not available`，请先安装当前 Python 版本对应的 venv 包，例如 `sudo apt install -y python3.13-venv`。
 
 ## API Key
 

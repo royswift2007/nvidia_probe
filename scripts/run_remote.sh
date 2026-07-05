@@ -18,13 +18,74 @@ ensure_command() {
   fi
 }
 
+run_privileged() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo "$@"
+  else
+    log "需要 root 权限或 sudo 才能自动安装系统依赖: $*"
+    return 1
+  fi
+}
+
+python_venv_packages() {
+  "$PYTHON_BIN" - <<'PY'
+import sys
+major = sys.version_info.major
+minor = sys.version_info.minor
+print(f"python{major}.{minor}-venv")
+print(f"python{major}-venv")
+print("python3-venv")
+PY
+}
+
+can_create_venv() {
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+  if "$PYTHON_BIN" -m venv "$tmp_dir/venv" >/dev/null 2>&1; then
+    rm -rf "$tmp_dir"
+    return 0
+  fi
+  rm -rf "$tmp_dir"
+  return 1
+}
+
+install_python_venv_dependency() {
+  if command -v apt-get >/dev/null 2>&1; then
+    log "检测到 Python venv/ensurepip 不完整，尝试自动安装 venv 系统依赖。"
+    run_privileged apt-get update
+    while IFS= read -r package_name; do
+      [ -n "$package_name" ] || continue
+      log "尝试安装: $package_name"
+      if run_privileged apt-get install -y "$package_name"; then
+        return 0
+      fi
+    done < <(python_venv_packages)
+  fi
+
+  log "无法自动安装 Python venv 依赖。"
+  log "Debian/Ubuntu 可手动执行: apt update && apt install -y $(python_venv_packages | head -n 1)"
+  return 1
+}
+
+ensure_venv_ready() {
+  if "$PYTHON_BIN" -m venv --help >/dev/null 2>&1 && can_create_venv; then
+    return 0
+  fi
+
+  install_python_venv_dependency
+  if "$PYTHON_BIN" -m venv --help >/dev/null 2>&1 && can_create_venv; then
+    return 0
+  fi
+
+  log "安装 venv 依赖后仍无法创建虚拟环境，请检查 Python 安装。"
+  exit 1
+}
+
 ensure_command git
 ensure_command "$PYTHON_BIN"
-
-if ! "$PYTHON_BIN" -m venv --help >/dev/null 2>&1; then
-  log "当前 Python 不支持 venv。Ubuntu/Debian 可执行: sudo apt update && sudo apt install -y python3-venv"
-  exit 1
-fi
+ensure_venv_ready
 
 mkdir -p "$INSTALL_DIR"
 
@@ -46,6 +107,9 @@ fi
 cd "$INSTALL_DIR"
 
 log "创建/更新虚拟环境"
+if [ -d .venv ]; then
+  rm -rf .venv
+fi
 "$PYTHON_BIN" -m venv .venv
 # shellcheck disable=SC1091
 source .venv/bin/activate
