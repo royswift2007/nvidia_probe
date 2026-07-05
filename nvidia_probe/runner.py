@@ -8,7 +8,7 @@ from .client import NvidiaApiClient
 from .cleanup import maybe_cleanup_program
 from .config import ProbeConfig
 from .environment import collect_environment
-from .models import normalize_models, should_test_model, sort_models_by_api_calls_30d
+from .models import NormalizedModel, normalize_models, should_test_model, sort_models_by_api_calls_30d
 from .ratelimit import BreakerState, should_break, sleep_with_jitter
 from .report import calculate_summary, print_table, write_csv, write_excel
 from .storage import completed_model_ids, initial_state, load_state, save_state, upsert_result
@@ -23,6 +23,27 @@ def _extract_raw_models(payload: Any) -> list[dict[str, Any]]:
     else:
         raw = []
     return [item for item in raw if isinstance(item, dict)]
+
+
+def _print_progress(message: str = "") -> None:
+    print(message, flush=True)
+
+
+def _format_model_identity(model: NormalizedModel) -> str:
+    parts = [model.model_id]
+    display_name = model.display_name.strip()
+    if display_name and display_name != model.model_id:
+        parts.append(f"name={display_name}")
+    parts.append(f"type={model.model_type}")
+    if model.usage_rank is not None:
+        parts.append(f"rank={model.usage_rank}")
+    calls_display = model.api_calls_30d_display or "unknown"
+    parts.append(f"30d_calls={calls_display}")
+    return " | ".join(parts)
+
+
+def _format_running_stats(processed: int, total: int, available: int, failed: int, skipped: int) -> str:
+    return f"累计: 已处理 {processed}/{total}，成功 {available}，失败 {failed}，跳过 {skipped}"
 
 
 def _print_startup(config: ProbeConfig, environment: dict[str, Any]) -> None:
@@ -93,28 +114,42 @@ def run_probe(config: ProbeConfig, project_root: Path) -> int:
     )
 
     try:
-        print("正在拉取 NVIDIA 模型列表...")
+        _print_progress("正在拉取 NVIDIA 模型列表...")
         models_response = client.get_models()
         if not models_response.ok:
             status, error_type, error_message = classify_response(models_response)
             state["abort_reason"] = f"拉取模型列表失败: {status} {error_type} {error_message[:300]}"
             save_state(config.state_file, state)
-            print(state["abort_reason"])
+            _print_progress(state["abort_reason"])
             return 2
 
         raw_models = _extract_raw_models(models_response.data)
         state["models_raw"] = raw_models
         state["models_payload_raw"] = models_response.data
         models = normalize_models(models_response.data)
-        print(f"已拉取模型数量: {len(models)}")
+        total_model_count = len(models)
+        free_model_count = sum(1 for model in models if model.is_free is True)
+        paid_model_count = sum(1 for model in models if model.is_free is False)
+        unknown_cost_count = sum(1 for model in models if model.is_free is None)
+        _print_progress(f"已拉取模型总数: {total_model_count}")
+        _print_progress(
+            f"free 模型统计: 可确认 free={free_model_count}，"
+            f"非免费/付费={paid_model_count}，费用未知={unknown_cost_count}"
+        )
 
+        selectable_count = 0
+        skipped_before_topn = 0
+        known_usage = 0
         if config.only_model:
             models = [model for model in models if model.model_id == config.only_model]
+            selectable_count = len(models)
+            known_usage = sum(1 for model in models if model.api_calls_30d is not None)
             if not models:
-                print(f"未找到指定模型: {config.only_model}")
+                _print_progress(f"未找到指定模型: {config.only_model}")
+            else:
+                _print_progress(f"指定模型模式: {config.only_model}；匹配数量: {len(models)}")
         else:
             selectable_models = []
-            skipped_before_topn = 0
             for model in models:
                 selected, _ = should_test_model(
                     model,
@@ -128,6 +163,7 @@ def run_probe(config: ProbeConfig, project_root: Path) -> int:
                     selectable_models.append(model)
                 else:
                     skipped_before_topn += 1
+            selectable_count = len(selectable_models)
             ranked_models = sort_models_by_api_calls_30d(selectable_models)
             known_usage = sum(1 for model in ranked_models if model.api_calls_30d is not None)
             if known_usage > 0 and config.top_free_models is not None:
@@ -136,28 +172,54 @@ def run_probe(config: ProbeConfig, project_root: Path) -> int:
             else:
                 models = ranked_models
                 topn_message = "未获取到 30 天 API 调用量数据，回退为检测全部免费候选模型。"
-            print(
-                f"免费且类型匹配候选模型: {len(selectable_models)}；"
-                f"跳过非免费/类型不匹配模型: {skipped_before_topn}；"
-                f"有 30 天调用量数据: {known_usage}。"
+            _print_progress(
+                f"筛选统计: 可确认 free 且类型匹配={selectable_count}；"
+                f"跳过非免费/类型不匹配={skipped_before_topn}；"
+                f"有 30 天调用量数据={known_usage}。"
             )
-            print(topn_message)
+            _print_progress(topn_message)
 
+        planned_before_limit_count = len(models)
         if config.limit is not None:
             models = models[: config.limit]
+            if len(models) < planned_before_limit_count:
+                _print_progress(f"--limit 已生效: 从 {planned_before_limit_count} 个候选缩减到 {len(models)} 个。")
 
-        print(f"本次候选模型数量: {len(models)}")
+        _print_progress(
+            f"检测计划: 获取 {free_model_count} 个可确认 free 模型；"
+            f"类型匹配候选 {selectable_count} 个；本次检测 {len(models)} 个模型。"
+        )
+        if known_usage > 0:
+            _print_progress(f"30 天 API 调用量覆盖: {known_usage}/{selectable_count} 个候选模型。")
+        else:
+            _print_progress("30 天 API 调用量覆盖: 0 个候选模型，将按回退策略检测。")
+        if models:
+            _print_progress("即将检测的模型列表:")
+            for planned_index, planned_model in enumerate(models, start=1):
+                _print_progress(f"  [{planned_index}/{len(models)}] {_format_model_identity(planned_model)}")
+
         if models and not config.dry_run:
             estimated_min = len(models) * config.delay_min
             estimated_max = len(models) * config.delay_max
-            print(f"预计仅等待时间约: {estimated_min:.0f}-{estimated_max:.0f} 秒，不含 API 响应耗时。")
+            _print_progress(f"预计仅等待时间约: {estimated_min:.0f}-{estimated_max:.0f} 秒，不含 API 响应耗时。")
 
         done = completed_model_ids(state) if config.resume and not config.force_retest else set()
         breaker = BreakerState()
+        total_to_process = len(models)
+        processed_count = 0
+        available_count = 0
+        failed_count = 0
+        skipped_count = 0
 
         for index, model in enumerate(models, start=1):
+            progress_prefix = f"[{index}/{total_to_process}]"
             if model.model_id in done:
-                print(f"[{index}/{len(models)}] 跳过已完成模型: {model.model_id}")
+                processed_count += 1
+                skipped_count += 1
+                _print_progress(
+                    f"{progress_prefix} 跳过已完成模型: {_format_model_identity(model)}；"
+                    f"{_format_running_stats(processed_count, total_to_process, available_count, failed_count, skipped_count)}"
+                )
                 continue
 
             selected, reason = should_test_model(
@@ -173,23 +235,43 @@ def run_probe(config: ProbeConfig, project_root: Path) -> int:
                 result = skipped_result(model, dry_reason)
                 upsert_result(state, result)
                 save_state(config.state_file, state)
-                print(f"[{index}/{len(models)}] dry-run 记录模型: {model.model_id} ({dry_reason})")
+                processed_count += 1
+                skipped_count += 1
+                _print_progress(
+                    f"{progress_prefix} dry-run 记录模型: {_format_model_identity(model)} ({dry_reason})；"
+                    f"{_format_running_stats(processed_count, total_to_process, available_count, failed_count, skipped_count)}"
+                )
                 continue
 
             if not selected:
                 result = skipped_result(model, reason)
                 upsert_result(state, result)
                 save_state(config.state_file, state)
-                print(f"[{index}/{len(models)}] 跳过 {model.model_id}: {reason}")
+                processed_count += 1
+                skipped_count += 1
+                _print_progress(
+                    f"{progress_prefix} 跳过 {_format_model_identity(model)}: {reason}；"
+                    f"{_format_running_stats(processed_count, total_to_process, available_count, failed_count, skipped_count)}"
+                )
                 continue
 
-            print(f"[{index}/{len(models)}] 测试 {model.model_id} ({model.model_type})...")
+            _print_progress(f"正在检测 {progress_prefix} {_format_model_identity(model)}")
             result = test_model(client, model, config.max_output_tokens, config.retries)
             upsert_result(state, result)
             save_state(config.state_file, state)
-            print(
-                f"  -> {result.get('test_status')} http={result.get('http_status')} "
-                f"latency={result.get('latency_total_ms')}ms error={result.get('error_type')}"
+            status = str(result.get("test_status", ""))
+            if status == "available":
+                available_count += 1
+            elif status == "skipped":
+                skipped_count += 1
+            else:
+                failed_count += 1
+            processed_count += 1
+            _print_progress(
+                f"完成 {progress_prefix} {model.model_id} -> status={status} "
+                f"http={result.get('http_status')} latency={result.get('latency_total_ms')}ms "
+                f"error={result.get('error_type') or ''}；"
+                f"{_format_running_stats(processed_count, total_to_process, available_count, failed_count, skipped_count)}"
             )
 
             breaker.record(
@@ -200,9 +282,9 @@ def run_probe(config: ProbeConfig, project_root: Path) -> int:
 
             if result.get("http_status") == 429:
                 if config.stop_on_first_429:
-                    print("触发 429 限流。为避免 API 风险，本次任务将立即停止。")
+                    _print_progress("触发 429 限流。为避免 API 风险，本次任务将立即停止。")
                 else:
-                    print(f"触发 429 限流，暂停 {config.rate_limit_sleep:.0f} 秒。")
+                    _print_progress(f"触发 429 限流，暂停 {config.rate_limit_sleep:.0f} 秒。")
                     time.sleep(config.rate_limit_sleep)
 
             stop, reason = should_break(
@@ -215,13 +297,13 @@ def run_probe(config: ProbeConfig, project_root: Path) -> int:
             if stop:
                 state["abort_reason"] = reason
                 save_state(config.state_file, state)
-                print(reason)
+                _print_progress(reason)
                 break
 
             if index < len(models):
                 slept = sleep_with_jitter(config.delay_min, config.delay_max)
                 if slept:
-                    print(f"已安全等待 {slept:.1f} 秒。")
+                    _print_progress(f"安全等待: {slept:.1f} 秒后继续下一个模型。")
 
         _write_reports(config, state)
         return 0

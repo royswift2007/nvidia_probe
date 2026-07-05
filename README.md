@@ -11,8 +11,49 @@
 - 默认跳过 image、video、audio 等高成本生成模型。
 - 记录服务器公网 IP、国家、系统、Python 版本等环境信息。
 - 保存断点 JSON，支持中断后继续。
+- 运行时实时输出 free 模型数量、计划检测数量、当前模型、结果和累计进度。
 - 输出 CSV、JSON，安装 openpyxl 后输出 Excel。
 - 执行完成后弹出或提示是否保留程序；选择不保留时删除程序文件，仅保留结果文件。
+
+## 远程服务器一条命令运行
+
+在 Linux 远程服务器上，如果已经安装 `curl`、`git`、`python3` 和 `python3-venv`，可以直接执行一条命令完成拉取、安装、运行。命令会自动创建虚拟环境；如果没有设置 `NVIDIA_API_KEY`，会提示隐藏输入 API Key，然后开始测试。
+
+推荐使用下面这种 `bash -c "$(curl ...)"` 形式，而不是 `curl ... | bash`，这样后续 Python 进程仍然可以从交互式终端安全读取 API Key：
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/royswift2007/nvidia_probe/main/scripts/run_remote.sh)"
+```
+
+如果服务器没有 `curl`，但有 `wget`：
+
+```bash
+bash -c "$(wget -qO- https://raw.githubusercontent.com/royswift2007/nvidia_probe/main/scripts/run_remote.sh)"
+```
+
+也可以在同一条命令里传入测试参数，例如只安全预检 3 个模型：
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/royswift2007/nvidia_probe/main/scripts/run_remote.sh)" nvidia-probe --top-free-models 3
+```
+
+默认运行结束后会询问是否卸载程序。选择卸载时会删除一键运行下载的仓库、虚拟环境、脚本、包代码和安装元数据，只保留 `results` 目录中的测试结果。若想运行后不询问卸载，可追加参数：
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/royswift2007/nvidia_probe/main/scripts/run_remote.sh)" nvidia-probe --cleanup-prompt never
+```
+
+默认会安装到当前目录下的 `.nvidia_probe`。如需指定安装目录：
+
+```bash
+NVIDIA_PROBE_INSTALL_DIR=/tmp/nvidia_probe bash -c "$(curl -fsSL https://raw.githubusercontent.com/royswift2007/nvidia_probe/main/scripts/run_remote.sh)"
+```
+
+如果缺少系统依赖，Ubuntu/Debian 可先执行：
+
+```bash
+sudo apt update && sudo apt install -y curl git python3 python3-venv
+```
 
 ## 安装
 
@@ -93,6 +134,27 @@ nvidia-probe run --top-free-models 10 --cleanup-prompt never
 nvidia-probe run --top-free-models 50 --cleanup-prompt never
 ```
 
+## 运行时实时进度
+
+运行时会持续在终端输出总体和详细检测状态，适合 SSH、tmux、screen 或服务器日志查看。关键输出包括：
+
+- 已拉取模型总数，以及可确认 free、非免费/付费、费用未知模型数量。
+- 可确认 free 且类型匹配的候选数量、30 天 API 调用量覆盖数量、TopN 或回退策略说明。
+- 本次实际检测数量，例如“获取 77 个可确认 free 模型；类型匹配候选 77 个；本次检测 20 个模型”。
+- 即将检测的模型列表，包含模型 ID、名称、类型、调用量排名和 30 天调用量。
+- 每个模型开始时显示“正在检测 [3/20] xxx”。
+- 每个模型完成后显示状态、HTTP 状态、延迟、错误类型，以及累计成功/失败/跳过数量。
+
+示例输出：
+
+```text
+已拉取模型总数: 92
+free 模型统计: 可确认 free=77，非免费/付费=8，费用未知=7
+检测计划: 获取 77 个可确认 free 模型；类型匹配候选 77 个；本次检测 20 个模型。
+正在检测 [1/20] meta/llama-3.1-8b-instruct | name=Llama 3.1 8B Instruct | type=chat | rank=1 | 30d_calls=2M
+完成 [1/20] meta/llama-3.1-8b-instruct -> status=available http=200 latency=1234ms error=；累计: 已处理 1/20，成功 1，失败 0，跳过 0
+```
+
 ## 免费模型策略
 
 默认开启“只测试可确认免费模型”：
@@ -169,7 +231,7 @@ nvidia-probe merge --inputs jp_probe_state.json de_probe_state.json us_probe_sta
 任务结束后默认会询问是否保留程序文件：
 
 - 选择保留：不删除任何程序文件。
-- 选择不保留：删除 `nvidia_probe` 包、`pyproject.toml`、`requirements.txt`、`README.md` 等程序文件，只保留结果文件。
+- 选择不保留：删除 `nvidia_probe` 包、`scripts`、`.venv`、`.git`、`pyproject.toml`、`requirements.txt`、`README.md`、构建目录和安装元数据等程序文件，只保留结果文件。
 
 如果远程环境没有图形界面，会退化为命令行确认。可通过参数控制：
 

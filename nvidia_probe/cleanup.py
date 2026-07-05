@@ -7,10 +7,17 @@ from pathlib import Path
 
 PROGRAM_PATHS = [
     "nvidia_probe",
+    "scripts",
     "pyproject.toml",
     "requirements.txt",
     "README.md",
+    ".venv",
+    ".git",
+    "build",
+    "dist",
+    "__pycache__",
 ]
+PROGRAM_GLOBS = ["*.egg-info"]
 
 
 def _ask_tkinter() -> bool | None:
@@ -65,21 +72,54 @@ def should_keep_program(cleanup_prompt: str) -> bool:
     return True
 
 
-def cleanup_program_files(project_root: Path, result_paths: list[Path]) -> list[Path]:
-    deleted: list[Path] = []
-    protected = {path.resolve() for path in result_paths if path.exists()}
+def _iter_cleanup_targets(project_root: Path):
+    seen: set[Path] = set()
     for relative in PROGRAM_PATHS:
         target = (project_root / relative).resolve()
-        if target in protected:
+        if target in seen:
+            continue
+        seen.add(target)
+        yield target
+    for pattern in PROGRAM_GLOBS:
+        for target in project_root.glob(pattern):
+            resolved = target.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            yield resolved
+
+
+def _contains_protected_path(target: Path, protected: set[Path]) -> bool:
+    for protected_path in protected:
+        if target == protected_path:
+            return True
+        try:
+            protected_path.relative_to(target)
+        except ValueError:
+            continue
+        return True
+    return False
+
+
+def cleanup_program_files(project_root: Path, result_paths: list[Path]) -> tuple[list[Path], list[tuple[Path, str]]]:
+    deleted: list[Path] = []
+    failures: list[tuple[Path, str]] = []
+    protected = {path.resolve() for path in result_paths if path.exists()}
+    for target in _iter_cleanup_targets(project_root):
+        if _contains_protected_path(target, protected):
             continue
         if not target.exists():
             continue
-        if target.is_dir():
-            shutil.rmtree(target)
-        else:
-            target.unlink()
+        try:
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+        except OSError as exc:
+            failures.append((target, str(exc)))
+            continue
         deleted.append(target)
-    return deleted
+    return deleted, failures
 
 
 def maybe_cleanup_program(cleanup_prompt: str, project_root: Path, result_paths: list[Path]) -> None:
@@ -87,10 +127,14 @@ def maybe_cleanup_program(cleanup_prompt: str, project_root: Path, result_paths:
     if keep:
         print("已选择保留程序文件。")
         return
-    deleted = cleanup_program_files(project_root, result_paths)
+    deleted, failures = cleanup_program_files(project_root, result_paths)
     if deleted:
         print("已删除程序文件：")
         for path in deleted:
             print(f"- {path}")
     else:
         print("没有发现可删除的程序文件。")
+    if failures:
+        print("以下程序文件未能删除，可稍后手动删除：")
+        for path, error in failures:
+            print(f"- {path}: {error}")
