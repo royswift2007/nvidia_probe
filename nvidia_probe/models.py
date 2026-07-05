@@ -945,12 +945,33 @@ def select_models_hybrid_topn(
         )
 
     stable_size, trending_size, newest_size = _hybrid_bucket_sizes(top_n, stable_ratio, trending_count, newest_count)
-    trending_candidates = [
+    trending_heat_ranked = sort_models_by_trending_heat(models)
+    newest_ranked = sort_models_by_newest(models)
+    strict_trending_candidates = [
         model
-        for model in sort_models_by_trending_heat(models)
+        for model in trending_heat_ranked
         if model.projected_30d_calls is not None and model.model_age_days is not None and model.model_age_days <= 30.0
     ]
-    newest_candidates = [model for model in sort_models_by_newest(models) if model.model_age_days is not None and model.model_age_days <= new_model_days]
+    newest_trending_fill_candidates = [model for model in newest_ranked if model.model_age_days is not None and model.api_calls_30d is not None]
+
+    def merge_unique_candidates(*candidate_groups: list[NormalizedModel]) -> list[NormalizedModel]:
+        merged: list[NormalizedModel] = []
+        merged_ids: set[str] = set()
+        for candidate_group in candidate_groups:
+            for candidate in candidate_group:
+                if candidate.model_id in merged_ids:
+                    continue
+                merged.append(candidate)
+                merged_ids.add(candidate.model_id)
+        return merged
+
+    trending_candidates = merge_unique_candidates(
+        strict_trending_candidates,
+        newest_trending_fill_candidates,
+        trending_heat_ranked,
+        usage_ranked,
+    )
+    newest_candidates = [model for model in newest_ranked if model.model_age_days is not None and model.model_age_days <= new_model_days]
 
     selected: list[NormalizedModel] = []
     seen: set[str] = set()
@@ -1005,14 +1026,30 @@ def select_models_hybrid_topn(
         lambda item: f"稳定热门池：30 天调用量排名 {item.usage_rank}，调用量 {item.api_calls_30d_display}",
         excluded_ids=reserved_for_non_stable,
     )
+    def trending_reason(item: NormalizedModel) -> str:
+        if item.projected_30d_calls is not None and item.model_age_days is not None and item.model_age_days <= 30.0:
+            return (
+                f"新晋热门池：折算 30 天调用量 {item.projected_30d_calls_display}，"
+                f"日均 {item.api_calls_per_day or 0:.0f}，年龄 {item.model_age_days} 天"
+            )
+        if item.model_age_days is not None and item.api_calls_30d is not None:
+            return (
+                "新晋热门池补足：30 天内新晋热门候选不足，按较新且有调用量的模型补足；"
+                f"年龄 {item.model_age_days} 天，30 天调用量 {item.api_calls_30d_display}，"
+                f"折算 30 天调用量 {item.projected_30d_calls_display}"
+            )
+        if item.api_calls_30d is not None:
+            return (
+                "新晋热门池补足：可用上架时间不足，按 30 天调用量候选补足；"
+                f"调用量排名 {item.usage_rank}，调用量 {item.api_calls_30d_display}"
+            )
+        return "新晋热门池补足：可用新晋数据不足，按候选列表顺序补足"
+
     add_from_bucket(
         reserved_trending,
         trending_size,
         "trending_new",
-        lambda item: (
-            f"新晋热门池：折算 30 天调用量 {item.projected_30d_calls_display}，"
-            f"日均 {item.api_calls_per_day or 0:.0f}，年龄 {item.model_age_days} 天"
-        ),
+        trending_reason,
     )
     add_from_bucket(
         reserved_newest,
@@ -1025,10 +1062,7 @@ def select_models_hybrid_topn(
             trending_candidates,
             bucket_counts["trending_new"] + (top_n - len(selected)),
             "trending_new",
-            lambda item: (
-                f"新晋热门池扩展：折算 30 天调用量 {item.projected_30d_calls_display}，"
-                f"日均 {item.api_calls_per_day or 0:.0f}，年龄 {item.model_age_days} 天"
-            ),
+            lambda item: trending_reason(item).replace("新晋热门池", "新晋热门池扩展", 1),
         )
 
     for index, model in enumerate(selected, start=1):
@@ -1050,6 +1084,8 @@ def select_models_hybrid_topn(
             "trending_window_days": 30.0,
             "stable_ratio": stable_ratio,
             "trending_quota": trending_size,
+            "trending_strict_candidate_count": len(strict_trending_candidates),
+            "trending_candidate_count": len(trending_candidates),
             "newest_quota": newest_size,
         },
     )

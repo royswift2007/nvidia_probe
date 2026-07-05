@@ -205,6 +205,32 @@ def _bool_value(value: Any) -> bool | None:
     return None
 
 
+def _catalog_created_at(resource: dict[str, Any]) -> tuple[str, str]:
+    raw_created = _attribute_value(
+        resource,
+        (
+            "date_created",
+            "dateCreated",
+            "created_at",
+            "createdAt",
+            "creation_date",
+            "creationDate",
+            "published_at",
+            "publishedAt",
+            "date_published",
+            "datePublished",
+            "release_date",
+            "releaseDate",
+        ),
+    )
+    if raw_created not in (None, ""):
+        created_at_utc, created_at_source = infer_created_at({"dateCreated": raw_created})
+        if created_at_utc:
+            return created_at_utc, f"attributes:{created_at_source}"
+
+    return infer_created_at(resource)
+
+
 def _catalog_model_from_resource(resource: dict[str, Any], page: int) -> BuildCatalogModel | None:
     nim_values, nim_unresolved = _label_values(resource, "nimType")
     is_free_endpoint = "Free Endpoint" in nim_values or "nim_type_preview" in nim_unresolved
@@ -234,7 +260,7 @@ def _catalog_model_from_resource(resource: dict[str, Any], page: int) -> BuildCa
     )
     api_calls = parse_human_count(raw_calls)
     api_calls_display = str(raw_calls) if isinstance(raw_calls, str) and raw_calls else format_human_count(api_calls)
-    created_at_utc, created_at_source = infer_created_at(resource)
+    created_at_utc, created_at_source = _catalog_created_at(resource)
 
     return BuildCatalogModel(
         model_id=model_id,
